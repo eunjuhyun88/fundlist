@@ -601,7 +601,174 @@ def help_hint(bot_username: str, chat_type: str, require_mention_in_group: bool)
             f"예: /help@{bot_username}\n"
             f"또는 @{bot_username} 이번주 VC 리드 5개 뽑아줘"
         )
-    return "명령은 /help, 대화형은 질문 문장을 보내면 됩니다."
+    return "명령은 /help 또는 /commands, 대화형은 질문 문장을 보내면 됩니다."
+
+
+def build_help_text(
+    bot_username: str,
+    chat_type: str,
+    require_mention_in_group: bool,
+    topic: str = "",
+) -> str:
+    prefix = ""
+    if require_mention_in_group and chat_type in {"group", "supergroup"} and bot_username:
+        prefix = f"그룹에서는 `@{bot_username}`를 붙여 쓰세요.\n예: `/help@{bot_username} ops`\n\n"
+
+    topic_key = topic.strip().lower()
+    if topic_key in {"ops", "daily", "report"}:
+        return (
+            prefix
+            + "\n".join(
+                [
+                    "[help: ops]",
+                    "/ops_sync",
+                    "  VC 리스트 import + 우선순위 큐 갱신",
+                    "/ops_daily [morning|evening]",
+                    "  daily digest 생성/전송",
+                    "/ops_report",
+                    "  전체 ops 리포트 생성",
+                    "/ops_list [days]",
+                    "  기본 큐 조회",
+                    "/ops_today",
+                    "  오늘 처리할 것",
+                    "/ops_week",
+                    "  이번 주 처리할 것",
+                    "/ops_speedrun",
+                    "  speedrun/cohort 후보 리포트",
+                    "/ops_program <keyword>",
+                    "  특정 프로그램 dossier",
+                    "/ops_push [morning|evening]",
+                    "  현재 채팅으로 digest 푸시",
+                ]
+            )
+        )
+    if topic_key in {"apply", "submission"}:
+        return (
+            prefix
+            + "\n".join(
+                [
+                    "[help: apply]",
+                    "/submission_scan [query|full]",
+                    "  공식 페이지/제출 링크 검증",
+                    "/submission_list [limit]",
+                    "  검증된 제출 타깃 목록",
+                    "/submission_report",
+                    "  submission markdown report 생성",
+                    "/submission_export",
+                    "  submission JSON export 생성",
+                    "/apply_open [limit]",
+                    "  지금 제출 가능한 항목",
+                    "/apply_deadline [limit]",
+                    "  마감일 있는 항목",
+                    "/apply_closed [limit]",
+                    "  닫힌 항목",
+                    "",
+                    "예:",
+                    "/submission_scan full",
+                    "/apply_open 10",
+                ]
+            )
+        )
+    if topic_key in {"task", "tasks"}:
+        return (
+            prefix
+            + "\n".join(
+                [
+                    "[help: tasks]",
+                    "/task_create <query>",
+                    "  verified opportunity를 task로 생성",
+                    "/task_view <task-id>",
+                    "  단일 task 상세 조회",
+                    "/task_ready <task-id>",
+                    "  ready_to_submit 전환",
+                    "/task_submitted <task-id> [note]",
+                    "  submitted 처리 + follow-up date 생성",
+                    "/tasks_ready [limit]",
+                    "  ready_to_submit 목록",
+                    "/tasks_followup [limit]",
+                    "  follow_up_due 목록",
+                    "",
+                    "예:",
+                    "/task_create alliance dao",
+                    "/task_ready 12",
+                    "/task_submitted 12 submitted manually",
+                ]
+            )
+        )
+    if topic_key in {"changes", "change"}:
+        return (
+            prefix
+            + "\n".join(
+                [
+                    "[help: changes]",
+                    "/changes_today [limit]",
+                    "  최근 24시간 변경",
+                    "/changes_recent [days]",
+                    "  최근 N일 변경",
+                    "",
+                    "변경 타입:",
+                    "- new_opportunity",
+                    "- status_changed",
+                    "- deadline_changed",
+                    "- submission_url_changed",
+                    "- reopened",
+                ]
+            )
+        )
+    if topic_key in {"context", "memory"}:
+        return (
+            prefix
+            + "\n".join(
+                [
+                    "[help: context]",
+                    "/context_save <summary>",
+                    "/context_compact",
+                    "/context_restore",
+                ]
+            )
+        )
+
+    return (
+        prefix
+        + "\n".join(
+            [
+                "[fundlist help]",
+                "",
+                "기본:",
+                "/status",
+                "/help <ops|apply|tasks|changes|context>",
+                "/commands",
+                "",
+                "VC ops:",
+                "/ops_sync",
+                "/ops_daily",
+                "/ops_today",
+                "/ops_week",
+                "/ops_program <keyword>",
+                "",
+                "submission/apply:",
+                "/submission_scan [full|query]",
+                "/apply_open [limit]",
+                "/apply_deadline [limit]",
+                "/apply_closed [limit]",
+                "/changes_today [limit]",
+                "",
+                "task management:",
+                "/task_create <query>",
+                "/task_view <task-id>",
+                "/task_ready <task-id>",
+                "/task_submitted <task-id> [note]",
+                "/tasks_ready [limit]",
+                "/tasks_followup [limit]",
+                "",
+                "예:",
+                "/help ops",
+                "/help apply",
+                "/submission_scan full",
+                "/task_create alliance dao",
+            ]
+        )
+    )
 
 
 def handle_command(
@@ -633,47 +800,14 @@ def handle_command(
     fundlist = [py, str(ROOT / "fundlist.py")]
     context_ctl = [py, str(ROOT / "scripts" / "context_ctl.py")]
 
-    if cmd in {"/start", "/help"}:
+    if cmd in {"/start", "/help", "/commands"}:
         client.send_message(
             chat_id,
-            "\n".join(
-                [
-                    "fundlist bot commands:",
-                    "/status",
-                    "/fundraise",
-                    "/fundraise_ai [groq|gemini|huggingface|openrouter]",
-                    "/report [fundraise|openclaw]",
-                    "/openclaw_dry <query>",
-                    "/openclaw_run <query>",
-                    "/ops_sync",
-                    "/ops_daily [morning|evening]",
-                    "/ops_report",
-                    "/ops_list [days]",
-                    "/ops_today",
-                    "/ops_week",
-                    "/ops_speedrun",
-                    "/ops_program <program-keyword>",
-                    "/submit_report <program-keyword>",
-                    "/ops_push",
-                    "/submission_scan [query]",
-                    "/submission_list [limit]",
-                    "/apply_open [limit]",
-                    "/apply_deadline [limit]",
-                    "/apply_closed [limit]",
-                    "/task_create <query>",
-                    "/task_view <task-id>",
-                    "/task_ready <task-id>",
-                    "/task_submitted <task-id> [note]",
-                    "/tasks_ready [limit]",
-                    "/tasks_followup [limit]",
-                    "/changes_today [limit]",
-                    "/changes_recent [days]",
-                    "/submission_report",
-                    "/submission_export",
-                    "/context_save <summary>",
-                    "/context_compact",
-                    "/context_restore",
-                ]
+            build_help_text(
+                bot_username=bot_username,
+                chat_type=chat_type,
+                require_mention_in_group=require_mention_in_group,
+                topic=arg,
             ),
         )
         return
@@ -1102,7 +1236,7 @@ def handle_command(
         return
 
     if chat_type == "private":
-        client.send_message(chat_id, "unknown command. use /help")
+        client.send_message(chat_id, "unknown command. use /help or /help ops")
 
 
 def main() -> int:
