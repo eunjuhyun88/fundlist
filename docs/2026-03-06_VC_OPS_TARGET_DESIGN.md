@@ -243,3 +243,5 @@ AI 보강
 4. 텔레그램 daily push 포맷 보강
 
 세부 실행 스펙은 [2026-03-06_VC_OPS_EXECUTION_SPEC.md](./2026-03-06_VC_OPS_EXECUTION_SPEC.md)에 정리한다.
+
+API 제품 관점의 상위 아키텍처는 [2026-03-07_VC_AGENT_API_PRODUCT_ARCHITECTURE.md](./2026-03-07_VC_AGENT_API_PRODUCT_ARCHITECTURE.md)에 정리한다.
