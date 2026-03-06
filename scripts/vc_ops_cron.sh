@@ -6,6 +6,7 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOG_DIR="$REPO_DIR/.context"
 LOG_FILE="$LOG_DIR/vc_ops.log"
 ENV_FILE="$REPO_DIR/.context/telegram.env"
+CONFIG_DIR="$REPO_DIR/config"
 DIGEST_MODE="${1:-${VC_OPS_PUSH_MODE:-morning}}"
 
 mkdir -p "$LOG_DIR"
@@ -22,7 +23,12 @@ fi
   --output "$REPO_DIR/data/reports/vc_ops_report.md" \
   >> "$LOG_FILE" 2>&1
 
-PROGRAMS_RAW="${VC_OPS_PROGRAMS:-alliance dao}"
+PROGRAMS_RAW="${VC_OPS_PROGRAMS:-}"
+PROGRAM_WATCHLIST_FILE="${VC_OPS_PROGRAM_FILE:-$CONFIG_DIR/program_watchlist.txt}"
+if [[ -z "$PROGRAMS_RAW" && -f "$PROGRAM_WATCHLIST_FILE" ]]; then
+  PROGRAMS_RAW="$(grep -v '^[[:space:]]*#' "$PROGRAM_WATCHLIST_FILE" | sed '/^[[:space:]]*$/d' | paste -sd, -)"
+fi
+PROGRAMS_RAW="${PROGRAMS_RAW:-alliance dao}"
 PROGRAM_REPORT_DIR="$REPO_DIR/data/reports/program_reports"
 mkdir -p "$PROGRAM_REPORT_DIR"
 
@@ -56,6 +62,10 @@ if [[ "${VC_SUBMISSION_SCAN:-1}" != "0" ]]; then
   )
   if [[ "${VC_SUBMISSION_JSON_OUTPUT:-1}" != "0" ]]; then
     SUBMISSION_ARGS+=(--json-output "$REPO_DIR/data/reports/submission_targets.json")
+  fi
+  QUERY_FILE="${VC_SUBMISSION_QUERY_FILE:-$CONFIG_DIR/submission_queries.txt}"
+  if [[ -f "$QUERY_FILE" ]]; then
+    SUBMISSION_ARGS+=(--query-file "$QUERY_FILE")
   fi
   if [[ "${VC_SUBMISSION_USE_FUNDRAISE_SEEDS:-1}" != "1" ]]; then
     SUBMISSION_ARGS+=(--no-fundraise-seeds)

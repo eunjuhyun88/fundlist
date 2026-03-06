@@ -1,0 +1,9 @@
+# One discovery query per line.
+# Used by scripts/vc_ops_cron.sh when VC_SUBMISSION_QUERY_FILE is not set.
+
+"ai accelerator" apply
+"crypto accelerator" apply
+"web3 grants" apply
+"speedrun" apply
+"startup fellowship" apply
+"founder program" apply

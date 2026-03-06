@@ -25,6 +25,11 @@ PDF importer는 구현되어 있지만, 기본 운영 큐에는 자동 포함하
 
 - `Investment Portfolio / Vesting` 류 PDF는 제출 큐가 아니라 참고 문서이기 때문이다.
 
+운영자가 자주 수정하게 되는 목록은 `config/`에 둔다.
+
+- [program_watchlist.txt](/Users/ej/Downloads/문서/VC_Fundraising/VC%20list/fundlist-git/config/program_watchlist.txt)
+- [submission_queries.txt](/Users/ej/Downloads/문서/VC_Fundraising/VC%20list/fundlist-git/config/submission_queries.txt)
+
 필요할 때만 명시적으로 `--files ...pdf`로 넣는다.
 
 ## 가장 중요한 명령

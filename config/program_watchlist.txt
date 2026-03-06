@@ -1,0 +1,8 @@
+# One program keyword per line.
+# Used by scripts/vc_ops_cron.sh when VC_OPS_PROGRAMS is not set.
+
+alliance dao
+a16z speedrun
+berkeley skydeck
+antler
+south park commons
