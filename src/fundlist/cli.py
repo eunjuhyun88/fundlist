@@ -17,6 +17,7 @@ from .fundraising import (
 )
 from .openclaw import openclaw_multi_command
 from .submission_finder import (
+    scan_failures_command,
     submission_export_command,
     submission_list_command,
     submission_report_command,
@@ -364,6 +365,9 @@ def build_parser() -> argparse.ArgumentParser:
     submission_scan.add_argument("--max-sites", type=int, default=120)
     submission_scan.add_argument("--max-pages-per-site", type=int, default=6)
     submission_scan.add_argument("--http-timeout", type=int, default=10)
+    submission_scan.add_argument("--resume-failures", action="store_true", help="Prepend unresolved failed seeds")
+    submission_scan.add_argument("--failures-only", action="store_true", help="Retry unresolved failed seeds only")
+    submission_scan.add_argument("--failure-limit", type=int, default=120, help="Max unresolved failed seeds to load")
     submission_scan.add_argument("--query-file", default="", help="Path to query template file (one query per line)")
     submission_scan.add_argument("--sector", default="", help="Comma-separated focus sectors (optional)")
     submission_scan.add_argument("--stage", default="", help="Comma-separated focus stages (optional)")
@@ -403,6 +407,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(PROJECT_ROOT / "data" / "reports" / "submission_targets.json"),
     )
     submission_export.set_defaults(func=submission_export_command)
+
+    scan_failures = sub.add_parser("scan-failures", help="List unresolved or resolved submission scan failures")
+    scan_failures.add_argument("--status", default="pending", choices=["pending", "resolved", "all"])
+    scan_failures.add_argument("--limit", type=int, default=80)
+    scan_failures.set_defaults(func=scan_failures_command)
 
     changes_list = sub.add_parser("changes-list", help="List structured opportunity changes")
     changes_list.add_argument(

@@ -702,6 +702,10 @@ def build_quickstart_text() -> str:
             "7. 최근 변경 보기",
             "/changes_today 20",
             "",
+            "8. 실패한 스캔만 다시 돌리기",
+            "/scan_failures 20",
+            "/retry_failed 50",
+            "",
             "더 자세한 설명:",
             "/help ops",
             "/help apply",
@@ -763,6 +767,10 @@ def build_help_text(
                     "  submission markdown report 생성",
                     "/submission_export",
                     "  submission JSON export 생성",
+                    "/scan_failures [limit]",
+                    "  unresolved scan failure 목록",
+                    "/retry_failed [limit]",
+                    "  실패한 seed만 재시도",
                     "/apply_open [limit]",
                     "  지금 제출 가능한 항목",
                     "/apply_deadline [limit]",
@@ -835,8 +843,12 @@ def build_help_text(
                     "   실제 신청 가능한 항목 확인",
                     "3. /apply_deadline 20",
                     "   마감일 있는 항목 확인",
-                    "4. 이상한 항목은 공식 링크 직접 열어 확인",
-                    "5. 맞는 항목은 /task_create <query>",
+                    "4. /scan_failures 20",
+                    "   중단/예외 난 seed 확인",
+                    "5. /retry_failed 50",
+                    "   실패 seed만 다시 스캔",
+                    "6. 이상한 항목은 공식 링크 직접 열어 확인",
+                    "7. 맞는 항목은 /task_create <query>",
                     "",
                     "이상 징후 예:",
                     "- closed 인데 open 으로 보임",
@@ -885,6 +897,8 @@ def build_help_text(
                 "",
                 "submission/apply:",
                 "/submission_scan [full|query]",
+                "/scan_failures [limit]",
+                "/retry_failed [limit]",
                 "/apply_open [limit]",
                 "/apply_deadline [limit]",
                 "/apply_closed [limit]",
@@ -1190,10 +1204,12 @@ def handle_command(
         full_sweep = raw_arg.lower() in {"full", "daily", "seed"}
         run_cmd = fundlist + [
             "submission-scan",
-            "--max-pages-per-site",
-            os.environ.get("VC_SUBMISSION_MAX_PAGES", "6"),
-            "--output",
-            str(DEFAULT_SUBMISSION_REPORT),
+                    "--max-pages-per-site",
+                    os.environ.get("VC_SUBMISSION_MAX_PAGES", "6"),
+                    "--output",
+                    str(DEFAULT_SUBMISSION_REPORT),
+                    "--json-output",
+                    str(DEFAULT_SUBMISSION_JSON),
         ]
         if full_sweep:
             run_cmd.extend(
@@ -1227,6 +1243,43 @@ def handle_command(
                 run_cmd.extend(["--query", raw_arg])
         code, out = run_local_command(run_cmd, timeout_sec=1200)
         msg = [format_command_result("submission-scan", code, out, max_lines=50), "", read_report(DEFAULT_SUBMISSION_REPORT)]
+        client.send_message(chat_id, "\n".join(msg))
+        return
+
+    if cmd == "/scan_failures":
+        limit = "20"
+        if arg and arg.strip().isdigit():
+            limit = str(max(1, min(100, int(arg.strip()))))
+        run_cmd = fundlist + ["scan-failures", "--status", "pending", "--limit", limit]
+        code, out = run_local_command(run_cmd, timeout_sec=60)
+        client.send_message(chat_id, format_command_result("scan-failures", code, out, max_lines=40))
+        return
+
+    if cmd == "/retry_failed":
+        limit = os.environ.get("VC_SUBMISSION_FAILURE_LIMIT", "80")
+        if arg and arg.strip().isdigit():
+            limit = str(max(1, min(300, int(arg.strip()))))
+        run_cmd = fundlist + [
+            "submission-scan",
+            "--resume-failures",
+            "--failures-only",
+            "--skip-search",
+            "--no-fundraise-seeds",
+            "--failure-limit",
+            limit,
+            "--max-sites",
+            limit,
+            "--max-pages-per-site",
+            os.environ.get("VC_SUBMISSION_MAX_PAGES", "6"),
+            "--report-limit",
+            os.environ.get("VC_SUBMISSION_REPORT_LIMIT", "120"),
+            "--output",
+            str(DEFAULT_SUBMISSION_REPORT),
+            "--json-output",
+            str(DEFAULT_SUBMISSION_JSON),
+        ]
+        code, out = run_local_command(run_cmd, timeout_sec=1200)
+        msg = [format_command_result("retry-failed", code, out, max_lines=50), "", read_report(DEFAULT_SUBMISSION_REPORT)]
         client.send_message(chat_id, "\n".join(msg))
         return
 

@@ -323,6 +323,23 @@ class DiscoverySeed:
 
 
 @dataclass
+class ScanFailure:
+    seed_url: str
+    org_name_hint: str
+    seed_source: str
+    page_url: str
+    stage: str
+    error_type: str
+    error_message: str
+
+
+@dataclass
+class ScanSiteResult:
+    target: Optional["SubmissionTarget"]
+    failures: List[ScanFailure]
+
+
+@dataclass
 class SubmissionTarget:
     org_name: str
     org_type: str
@@ -415,6 +432,25 @@ class SubmissionStore:
             """
         )
         self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scan_failures (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              seed_url TEXT NOT NULL,
+              org_name_hint TEXT NOT NULL DEFAULT '',
+              seed_source TEXT NOT NULL DEFAULT '',
+              page_url TEXT NOT NULL DEFAULT '',
+              stage TEXT NOT NULL,
+              error_type TEXT NOT NULL,
+              error_message TEXT NOT NULL DEFAULT '',
+              status TEXT NOT NULL DEFAULT 'pending',
+              retry_count INTEGER NOT NULL DEFAULT 1,
+              first_detected_at TEXT NOT NULL,
+              last_attempted_at TEXT NOT NULL,
+              resolved_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_submission_score ON submission_targets(score DESC, last_checked_at DESC)"
         )
         self.conn.execute(
@@ -428,6 +464,12 @@ class SubmissionStore:
         )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_opportunity_changes_fp ON opportunity_changes(fingerprint, detected_at DESC)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scan_failures_status ON scan_failures(status, last_attempted_at DESC)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scan_failures_seed ON scan_failures(seed_url, status, last_attempted_at DESC)"
         )
         self.conn.commit()
 
@@ -976,6 +1018,155 @@ class SubmissionStore:
         cur = self.conn.execute(sql, tuple(args))
         return cur.fetchall()
 
+    def record_scan_failure(self, failure: ScanFailure, *, detected_at: str) -> None:
+        seed_url = _canonicalize_url(failure.seed_url)
+        if not seed_url:
+            return
+        page_url = _canonicalize_url(failure.page_url) if failure.page_url else ""
+        error_type = sanitize(failure.error_type, limit=80)
+        stage = sanitize(failure.stage, limit=80)
+        org_name_hint = sanitize(failure.org_name_hint, limit=180)
+        raw_seed_source = str(failure.seed_source or "").strip()
+        while raw_seed_source.startswith("failure:"):
+            raw_seed_source = raw_seed_source.split(":", 1)[1].strip()
+        seed_source = sanitize(raw_seed_source or "scan", limit=120)
+        error_message = sanitize(failure.error_message, limit=300)
+        with self.conn:
+            cur = self.conn.execute(
+                """
+                SELECT id, retry_count
+                FROM scan_failures
+                WHERE status = 'pending'
+                  AND seed_url = ?
+                  AND page_url = ?
+                  AND stage = ?
+                  AND error_type = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (seed_url, page_url, stage, error_type),
+            )
+            row = cur.fetchone()
+            if row is None:
+                self.conn.execute(
+                    """
+                    INSERT INTO scan_failures (
+                      seed_url, org_name_hint, seed_source, page_url, stage, error_type,
+                      error_message, status, retry_count, first_detected_at, last_attempted_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 1, ?, ?)
+                    """,
+                    (
+                        seed_url,
+                        org_name_hint,
+                        seed_source,
+                        page_url,
+                        stage,
+                        error_type,
+                        error_message,
+                        detected_at,
+                        detected_at,
+                    ),
+                )
+                return
+            self.conn.execute(
+                """
+                UPDATE scan_failures
+                SET org_name_hint = ?,
+                    seed_source = ?,
+                    error_message = ?,
+                    retry_count = ?,
+                    last_attempted_at = ?
+                WHERE id = ?
+                """,
+                (
+                    org_name_hint,
+                    seed_source,
+                    error_message,
+                    int(row[1] or 0) + 1,
+                    detected_at,
+                    int(row[0]),
+                ),
+            )
+
+    def resolve_scan_failures(self, seed_url: str, *, resolved_at: str) -> int:
+        normalized = _canonicalize_url(seed_url)
+        if not normalized:
+            return 0
+        before = self.conn.total_changes
+        with self.conn:
+            self.conn.execute(
+                """
+                UPDATE scan_failures
+                SET status = 'resolved',
+                    resolved_at = ?,
+                    last_attempted_at = ?
+                WHERE status = 'pending'
+                  AND seed_url = ?
+                """,
+                (resolved_at, resolved_at, normalized),
+            )
+        return self.conn.total_changes - before
+
+    def list_scan_failures(
+        self,
+        *,
+        limit: int = 50,
+        status: str = "pending",
+    ) -> List[sqlite3.Row]:
+        self.conn.row_factory = sqlite3.Row
+        where: List[str] = ["1 = 1"]
+        args: List[object] = []
+        status_low = status.strip().lower()
+        if status_low in {"pending", "resolved"}:
+            where.append("status = ?")
+            args.append(status_low)
+        sql = f"""
+            SELECT id, seed_url, org_name_hint, seed_source, page_url, stage, error_type,
+                   error_message, status, retry_count, first_detected_at, last_attempted_at, resolved_at
+            FROM scan_failures
+            WHERE {' AND '.join(where)}
+            ORDER BY
+              CASE status WHEN 'pending' THEN 0 ELSE 1 END,
+              last_attempted_at DESC,
+              id DESC
+            LIMIT ?
+        """
+        args.append(limit)
+        cur = self.conn.execute(sql, tuple(args))
+        return cur.fetchall()
+
+    def load_pending_failure_seeds(self, *, limit: int = 80) -> List[DiscoverySeed]:
+        self.conn.row_factory = sqlite3.Row
+        cur = self.conn.execute(
+            """
+            SELECT seed_url, org_name_hint, seed_source, retry_count, last_attempted_at
+            FROM scan_failures
+            WHERE status = 'pending'
+            ORDER BY retry_count ASC, last_attempted_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        out: List[DiscoverySeed] = []
+        seen: set[str] = set()
+        for row in cur.fetchall():
+            url = _normalize_seed_url(str(row["seed_url"] or ""))
+            if not url:
+                continue
+            key = _seed_identity(url)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            source = str(row["seed_source"] or "").strip() or "scan"
+            out.append(
+                DiscoverySeed(
+                    url=url,
+                    org_name_hint=sanitize(str(row["org_name_hint"] or ""), limit=120),
+                    source=f"failure:{source}",
+                )
+            )
+        return out
+
     def prune_scanned_domains(self, scanned_domains: Sequence[str], keep_fingerprints: Sequence[str]) -> int:
         domains = [d.strip().lower() for d in scanned_domains if d and _is_target_domain(d.strip().lower())]
         if not domains:
@@ -1151,6 +1342,13 @@ def _canonicalize_url(url: str) -> str:
     if path != "/":
         path = path.rstrip("/")
     return urllib.parse.urlunsplit((parsed.scheme, netloc, path, "", ""))
+
+
+def _safe_urljoin(base_url: str, raw_url: str) -> str:
+    try:
+        return urllib.parse.urljoin(base_url, unescape((raw_url or "").strip()))
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _domain_key(url: str) -> str:
@@ -1352,7 +1550,9 @@ def _extract_links(base_url: str, html: str) -> List[Tuple[str, str]]:
     )
     for href, label_html in pattern.findall(html):
         label = sanitize(_strip_tags(label_html), limit=180)
-        joined = urllib.parse.urljoin(base_url, unescape(href.strip()))
+        joined = _safe_urljoin(base_url, href)
+        if not joined:
+            continue
         url = _canonicalize_url(joined)
         if not url:
             continue
@@ -1368,7 +1568,10 @@ def _extract_embed_form_urls(base_url: str, html: str) -> List[str]:
     ]
     for pat in patterns:
         for raw in re.findall(pat, html, flags=re.IGNORECASE):
-            candidate = _canonicalize_url(urllib.parse.urljoin(base_url, unescape(raw.strip())))
+            joined = _safe_urljoin(base_url, raw)
+            if not joined:
+                continue
+            candidate = _canonicalize_url(joined)
             if not candidate:
                 continue
             if _looks_actionable_form_url(candidate):
@@ -1840,10 +2043,22 @@ def _candidate_rank(target: SubmissionTarget) -> Tuple[int, int, int, int, int]:
     return (submission_rank, status_rank, url_rank, -target.score, len(target.submission_url))
 
 
-def _scan_site(seed: DiscoverySeed, max_pages: int = 6, http_timeout: int = 10) -> Optional[SubmissionTarget]:
+def _scan_failure(seed: DiscoverySeed, *, page_url: str, stage: str, exc: Exception) -> ScanFailure:
+    return ScanFailure(
+        seed_url=seed.url,
+        org_name_hint=seed.org_name_hint,
+        seed_source=seed.source,
+        page_url=page_url,
+        stage=stage,
+        error_type=exc.__class__.__name__,
+        error_message=str(exc),
+    )
+
+
+def _scan_site(seed: DiscoverySeed, max_pages: int = 6, http_timeout: int = 10) -> ScanSiteResult:
     root = _canonicalize_url(seed.url)
     if not root:
-        return None
+        return ScanSiteResult(target=None, failures=[])
 
     root_home = urllib.parse.urlunsplit((urllib.parse.urlsplit(root).scheme, urllib.parse.urlsplit(root).netloc, "/", "", ""))
     queue: deque[str] = deque([root])
@@ -1852,6 +2067,7 @@ def _scan_site(seed: DiscoverySeed, max_pages: int = 6, http_timeout: int = 10) 
 
     visited: set[str] = set()
     best: Optional[SubmissionTarget] = None
+    failures: List[ScanFailure] = []
 
     while queue and len(visited) < max_pages:
         current = queue.popleft()
@@ -1861,7 +2077,8 @@ def _scan_site(seed: DiscoverySeed, max_pages: int = 6, http_timeout: int = 10) 
 
         try:
             html, resolved_current = _fetch_html(current, timeout=http_timeout)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            failures.append(_scan_failure(seed, page_url=current, stage="fetch", exc=exc))
             continue
         if not html:
             continue
@@ -1869,11 +2086,20 @@ def _scan_site(seed: DiscoverySeed, max_pages: int = 6, http_timeout: int = 10) 
         if page_url not in visited:
             visited.add(page_url)
 
-        candidate = _evaluate_page(url=page_url, source_url=page_url, html=html, org_hint=seed.org_name_hint)
+        try:
+            candidate = _evaluate_page(url=page_url, source_url=page_url, html=html, org_hint=seed.org_name_hint)
+        except Exception as exc:  # noqa: BLE001
+            failures.append(_scan_failure(seed, page_url=page_url, stage="evaluate", exc=exc))
+            candidate = None
         if candidate and (best is None or _candidate_rank(candidate) < _candidate_rank(best)):
             best = candidate
 
-        for link_url, link_text in _extract_links(page_url, html):
+        try:
+            links = _extract_links(page_url, html)
+        except Exception as exc:  # noqa: BLE001
+            failures.append(_scan_failure(seed, page_url=page_url, stage="extract_links", exc=exc))
+            links = []
+        for link_url, link_text in links:
             if link_url in visited:
                 continue
             if not _looks_submission_link(link_url, link_text):
@@ -1881,7 +2107,7 @@ def _scan_site(seed: DiscoverySeed, max_pages: int = 6, http_timeout: int = 10) 
             if _same_domain(root, link_url) or _same_org_family(root, link_url):
                 queue.append(link_url)
 
-    return best
+    return ScanSiteResult(target=best, failures=failures)
 
 
 def _decode_ddg_url(url: str) -> str:
@@ -2304,20 +2530,23 @@ def submission_scan_command(args: argparse.Namespace) -> int:
     store = SubmissionStore(args.db)
 
     manual_seeds = [s.strip() for s in (args.seed_urls or "").split(",") if s.strip()]
-    seeds: List[DiscoverySeed] = [
-        DiscoverySeed(url=_normalize_seed_url(u), org_name_hint="", source="manual") for u in manual_seeds
-    ]
+    seeds: List[DiscoverySeed] = []
+    if not args.failures_only:
+        seeds.extend(DiscoverySeed(url=_normalize_seed_url(u), org_name_hint="", source="manual") for u in manual_seeds)
+        # Re-check previously known submission targets first, then expand to fundraising DB websites.
+        seeds.extend(_load_submission_target_seeds(args.db, limit=max(120, min(args.max_sites * 3, 360))))
+        if args.from_fundraise:
+            seeds.extend(_load_fundraise_seeds(args.db, limit=args.fundraise_seed_limit))
 
-    # Re-check previously known submission targets first, then expand to fundraising DB websites.
-    seeds.extend(_load_submission_target_seeds(args.db, limit=max(120, min(args.max_sites * 3, 360))))
-
-    if args.from_fundraise:
-        seeds.extend(_load_fundraise_seeds(args.db, limit=args.fundraise_seed_limit))
+    resumed_failure_seeds: List[DiscoverySeed] = []
+    if args.resume_failures or args.failures_only:
+        resumed_failure_seeds = store.load_pending_failure_seeds(limit=args.failure_limit)
+        seeds = resumed_failure_seeds + seeds
 
     queries: List[str] = list(args.query or [])
     if args.query_file:
         queries.extend(_load_query_file(args.query_file))
-    if not queries and not args.skip_search:
+    if not queries and not args.skip_search and not args.failures_only:
         queries = list(DEFAULT_DISCOVERY_QUERIES)
 
     sectors = _parse_terms(args.sector)
@@ -2325,7 +2554,7 @@ def submission_scan_command(args: argparse.Namespace) -> int:
     regions = _parse_terms(args.region)
     queries = _extend_queries_with_focus(queries, sectors=sectors, stages=stages, regions=regions)
 
-    if not args.skip_search:
+    if not args.skip_search and not args.failures_only:
         for query in queries:
             try:
                 hits = _search_duckduckgo(query, max_results=args.max_results_per_query)
@@ -2351,6 +2580,8 @@ def submission_scan_command(args: argparse.Namespace) -> int:
     raw_desc = ", ".join(f"{k}={v}" for k, v in sorted(source_counts_raw.items())) or "none"
     deduped_desc = ", ".join(f"{k}={v}" for k, v in sorted(source_counts_deduped.items())) or "none"
     print(f"[info] seeds={len(deduped)} (raw={len(seeds)})")
+    if resumed_failure_seeds:
+        print(f"[info] resumed_failures={len(resumed_failure_seeds)}")
     print(f"[info] seed_sources(raw)={raw_desc}")
     print(f"[info] seed_sources(deduped)={deduped_desc}")
     preview_groups: Dict[str, List[DiscoverySeed]] = {}
@@ -2365,15 +2596,32 @@ def submission_scan_command(args: argparse.Namespace) -> int:
             )
 
     found: List[SubmissionTarget] = []
-    scanned_domains: List[str] = []
+    prunable_domains: List[str] = []
+    failure_rows = 0
+    resolved_failures = 0
     for idx, seed in enumerate(deduped, start=1):
         if not seed.url:
             continue
-        scanned_domains.append(_domain_key(seed.url))
-        target = _scan_site(seed, max_pages=args.max_pages_per_site, http_timeout=args.http_timeout)
+        domain = _domain_key(seed.url)
+        result = _scan_site(seed, max_pages=args.max_pages_per_site, http_timeout=args.http_timeout)
+        attempted_at = now_utc_iso()
+        if result.failures:
+            for failure in result.failures:
+                store.record_scan_failure(failure, detected_at=attempted_at)
+            failure_rows += len(result.failures)
+            print(
+                f"[warn] {idx}/{len(deduped)} {seed.org_name_hint or domain or seed.url} | "
+                f"failures={len(result.failures)}"
+            )
+        target = result.target
         if not target:
+            if not result.failures:
+                prunable_domains.append(domain)
+                resolved_failures += store.resolve_scan_failures(seed.url, resolved_at=attempted_at)
             continue
         found.append(target)
+        prunable_domains.append(domain)
+        resolved_failures += store.resolve_scan_failures(seed.url, resolved_at=attempted_at)
         print(
             f"[hit] {idx}/{len(deduped)} {target.org_name} | {target.submission_type} | "
             f"{target.status} | deadline={target.deadline_date or '-'} | score={target.score} | "
@@ -2381,7 +2629,7 @@ def submission_scan_command(args: argparse.Namespace) -> int:
         )
 
     changed = store.upsert_targets(found)
-    pruned = store.prune_scanned_domains(scanned_domains, [t.fingerprint for t in found])
+    pruned = store.prune_scanned_domains(prunable_domains, [t.fingerprint for t in found])
     cleaned = store.cleanup_noise()
     rows = store.list_targets(
         limit=args.report_limit,
@@ -2412,6 +2660,7 @@ def submission_scan_command(args: argparse.Namespace) -> int:
 
     print(
         f"[done] scanned={len(deduped)} found={len(found)} changed={changed} pruned={pruned} cleaned={cleaned} "
+        f"failures={failure_rows} resolved_failures={resolved_failures} "
         f"report={output}"
     )
     return 0
@@ -2498,4 +2747,35 @@ def submission_export_command(args: argparse.Namespace) -> int:
     }
     output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[done] export={output} rows={len(rows)}")
+    return 0
+
+
+def scan_failures_command(args: argparse.Namespace) -> int:
+    store = SubmissionStore(args.db)
+    rows = store.list_scan_failures(limit=args.limit, status=args.status)
+    if not rows:
+        print("(no scan failures)")
+        return 0
+
+    print(
+        "id\tstatus\tretry_count\tseed_source\torg_name\tstage\terror_type\tseed_url\tpage_url\tlast_attempted_at\terror_message"
+    )
+    for row in rows:
+        print(
+            "\t".join(
+                [
+                    str(row["id"]),
+                    str(row["status"]),
+                    str(row["retry_count"]),
+                    str(row["seed_source"]),
+                    str(row["org_name_hint"]),
+                    str(row["stage"]),
+                    str(row["error_type"]),
+                    str(row["seed_url"]),
+                    str(row["page_url"] or ""),
+                    str(row["last_attempted_at"]),
+                    str(row["error_message"]),
+                ]
+            )
+        )
     return 0
