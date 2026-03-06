@@ -185,6 +185,35 @@ def _load_recent_events(db_path: Path, limit: int = 6) -> List[sqlite3.Row]:
     return rows
 
 
+def _load_submission_task_rows(db_path: Path, *, submission_state: str = "", limit: int = 12) -> List[sqlite3.Row]:
+    if not db_path.exists():
+        return []
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        where = ["workspace_key = 'default'"]
+        args: List[object] = []
+        if submission_state:
+            where.append("submission_state = ?")
+            args.append(submission_state)
+        sql = f"""
+            SELECT
+              id, org_name, opportunity_status, submission_state, owner, due_date,
+              priority_score, submission_url, official_page, submitted_at, follow_up_due_at
+            FROM submission_tasks
+            WHERE {' AND '.join(where)}
+            ORDER BY priority_score DESC, updated_at DESC, id DESC
+            LIMIT ?
+        """
+        args.append(limit)
+        rows = conn.execute(sql, tuple(args)).fetchall()
+    except Exception:  # noqa: BLE001
+        rows = []
+    finally:
+        conn.close()
+    return rows
+
+
 def _format_task_line(idx: int, row: sqlite3.Row) -> str:
     url = str(row["submission_url"] or row["website"] or "").strip()
     reason = str(row["priority_reason"] or "").strip()
@@ -195,10 +224,21 @@ def _format_task_line(idx: int, row: sqlite3.Row) -> str:
     )
 
 
-def build_ops_digest(db_path: Path, report_path: Path, *, mode: str = "morning") -> str:
+def _format_managed_task_line(idx: int, row: sqlite3.Row) -> str:
+    due = str(row["follow_up_due_at"] or row["due_date"] or "-").strip() or "-"
+    owner = str(row["owner"] or "-").strip() or "-"
+    url = str(row["submission_url"] or row["official_page"] or "-").strip() or "-"
+    return (
+        f"{idx}. #{row['id']} {row['org_name']} | state={row['submission_state']} | "
+        f"due={due} | score={row['priority_score']} | owner={owner} | {url}"
+    )
+
+
+def build_ops_digest(db_path: Path, report_path: Path, submission_json_path: Path, *, mode: str = "morning") -> str:
     rows = _load_ops_rows(db_path)
-    submission_json = ROOT / "data" / "reports" / "submission_targets.json"
-    submission_items = _sort_submission_items(load_submission_items(submission_json))
+    ready_task_rows = _load_submission_task_rows(db_path, submission_state="ready_to_submit", limit=6)
+    followup_task_rows = _load_submission_task_rows(db_path, submission_state="follow_up_due", limit=6)
+    submission_items = _sort_submission_items(load_submission_items(submission_json_path))
     apply_now_items = [
         item
         for item in submission_items
@@ -207,7 +247,7 @@ def build_ops_digest(db_path: Path, report_path: Path, *, mode: str = "morning")
     closed_items = [item for item in submission_items if str(item.get("status", "")).lower() == "closed"]
     speedrun_items = [item for item in submission_items if _is_speedrun_submission(item)]
 
-    if not rows and not submission_items:
+    if not rows and not submission_items and not ready_task_rows and not followup_task_rows:
         if not report_path.exists():
             return f"(missing) {report_path}"
         return "[VC OPS]\n" + read_excerpt(report_path, max_lines=50, max_chars=2200)
@@ -224,6 +264,7 @@ def build_ops_digest(db_path: Path, report_path: Path, *, mode: str = "morning")
         f"- generated: {now_utc_iso()}",
         f"- active outreach rows: {len(rows)}",
         f"- apply targets: {len(submission_items)}",
+        f"- managed tasks: {len(ready_task_rows) + len(followup_task_rows)} tracked",
     ]
 
     if mode == "evening":
@@ -250,6 +291,20 @@ def build_ops_digest(db_path: Path, report_path: Path, *, mode: str = "morning")
         else:
             out.append("- none")
 
+        out.extend(["", "ready to submit:"])
+        if ready_task_rows:
+            for idx, row in enumerate(ready_task_rows[:4], start=1):
+                out.append(_format_managed_task_line(idx, row))
+        else:
+            out.append("- none")
+
+        out.extend(["", "follow-up due:"])
+        if followup_task_rows:
+            for idx, row in enumerate(followup_task_rows[:4], start=1):
+                out.append(_format_managed_task_line(idx, row))
+        else:
+            out.append("- none")
+
         out.extend(["", "closed / skip:"])
         if closed_items:
             for idx, item in enumerate(closed_items[:5], start=1):
@@ -268,6 +323,8 @@ def build_ops_digest(db_path: Path, report_path: Path, *, mode: str = "morning")
         ("today", by_bucket.get("today", []) + by_bucket.get("overdue", []), 5),
         ("this week", by_bucket.get("this_week", []), 6),
         ("apply now", apply_now_items, 6),
+        ("ready to submit", ready_task_rows, 5),
+        ("follow-up due", followup_task_rows, 5),
         ("closed / skip", closed_items, 4),
         ("new speedrun / cohort", speedrun_items if speedrun_items else speedrun_rows, 5),
         ("no deadline / outreach", by_bucket.get("no_deadline", []), 6),
@@ -276,7 +333,10 @@ def build_ops_digest(db_path: Path, report_path: Path, *, mode: str = "morning")
         out.extend(["", f"{title_text}:"])
         if section_rows:
             first = section_rows[0]
-            if isinstance(first, sqlite3.Row):
+            if isinstance(first, sqlite3.Row) and "submission_state" in first.keys():
+                for idx, row in enumerate(section_rows[:limit], start=1):
+                    out.append(_format_managed_task_line(idx, row))
+            elif isinstance(first, sqlite3.Row):
                 for idx, row in enumerate(section_rows[:limit], start=1):
                     out.append(_format_task_line(idx, row))
             else:
@@ -510,7 +570,7 @@ def main() -> int:
     program_dir = Path(args.program_dir).expanduser()
     submission_path = Path(args.submission_report).expanduser()
     submission_json = Path(args.submission_json).expanduser()
-    sections: List[str] = [build_ops_digest(db_path, ops_path, mode=args.mode)]
+    sections: List[str] = [build_ops_digest(db_path, ops_path, submission_json, mode=args.mode)]
 
     if os.environ.get("VC_OPS_INCLUDE_SUBMISSION_REPORT", "0").strip() != "0":
         sections.append(parse_submission_digest(submission_path, submission_json, top_n=args.submission_top_n))

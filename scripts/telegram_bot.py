@@ -660,6 +660,12 @@ def handle_command(
                     "/apply_open [limit]",
                     "/apply_deadline [limit]",
                     "/apply_closed [limit]",
+                    "/task_create <query>",
+                    "/task_view <task-id>",
+                    "/task_ready <task-id>",
+                    "/task_submitted <task-id> [note]",
+                    "/tasks_ready [limit]",
+                    "/tasks_followup [limit]",
                     "/submission_report",
                     "/submission_export",
                     "/context_save <summary>",
@@ -971,6 +977,58 @@ def handle_command(
             client.send_message(chat_id, format_submission_subset("APPLY DEADLINE", ["deadline"], limit=limit))
             return
         client.send_message(chat_id, format_submission_subset("APPLY CLOSED", ["closed"], limit=limit))
+        return
+
+    if cmd == "/task_create":
+        if not arg:
+            client.send_message(chat_id, "usage: /task_create <keyword or fingerprint>")
+            return
+        run_cmd = fundlist + ["task-create", arg.strip()]
+        code, out = run_local_command(run_cmd, timeout_sec=120)
+        client.send_message(chat_id, format_command_result("task-create", code, out, max_lines=30))
+        return
+
+    if cmd == "/task_view":
+        if not arg or not arg.strip().isdigit():
+            client.send_message(chat_id, "usage: /task_view <task-id>")
+            return
+        run_cmd = fundlist + ["task-view", arg.strip()]
+        code, out = run_local_command(run_cmd, timeout_sec=60)
+        client.send_message(chat_id, format_command_result("task-view", code, out, max_lines=40))
+        return
+
+    if cmd == "/task_ready":
+        if not arg or not arg.strip().isdigit():
+            client.send_message(chat_id, "usage: /task_ready <task-id>")
+            return
+        run_cmd = fundlist + ["task-ready", arg.strip()]
+        code, out = run_local_command(run_cmd, timeout_sec=60)
+        client.send_message(chat_id, format_command_result("task-ready", code, out, max_lines=25))
+        return
+
+    if cmd == "/task_submitted":
+        if not arg:
+            client.send_message(chat_id, "usage: /task_submitted <task-id> [note]")
+            return
+        parts2 = arg.split(maxsplit=1)
+        if not parts2[0].isdigit():
+            client.send_message(chat_id, "usage: /task_submitted <task-id> [note]")
+            return
+        run_cmd = fundlist + ["task-submitted", parts2[0]]
+        if len(parts2) > 1 and parts2[1].strip():
+            run_cmd.extend(["--note", parts2[1].strip()])
+        code, out = run_local_command(run_cmd, timeout_sec=60)
+        client.send_message(chat_id, format_command_result("task-submitted", code, out, max_lines=25))
+        return
+
+    if cmd in {"/tasks_ready", "/tasks_followup"}:
+        limit = "20"
+        if arg and arg.strip().isdigit():
+            limit = str(max(1, min(50, int(arg.strip()))))
+        bucket = "ready" if cmd == "/tasks_ready" else "followup"
+        run_cmd = fundlist + ["task-list", "--bucket", bucket, "--limit", limit]
+        code, out = run_local_command(run_cmd, timeout_sec=60)
+        client.send_message(chat_id, format_command_result(cmd.lstrip("/"), code, out, max_lines=35))
         return
 
     if cmd == "/submission_report":

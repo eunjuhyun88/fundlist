@@ -20,6 +20,16 @@ from .submission_finder import (
     submission_report_command,
     submission_scan_command,
 )
+from .submission_tasks import (
+    task_add_note_command,
+    task_create_command,
+    task_followup_command,
+    task_list_command,
+    task_ready_command,
+    task_submitted_command,
+    task_update_command,
+    task_view_command,
+)
 from .store import SQLiteStore
 from .vc_ops import (
     ops_list_command,
@@ -385,6 +395,96 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(PROJECT_ROOT / "data" / "reports" / "submission_targets.json"),
     )
     submission_export.set_defaults(func=submission_export_command)
+
+    task_create = sub.add_parser("task-create", help="Create a managed submission task from a verified opportunity")
+    task_create.add_argument("target", help="Opportunity fingerprint or keyword query")
+    task_create.add_argument("--workspace", default="default")
+    task_create.add_argument("--owner", default="")
+    task_create.add_argument("--due-date", default="")
+    task_create.add_argument(
+        "--submission-state",
+        default="researching",
+        choices=sorted(
+            [
+                "not_started",
+                "researching",
+                "drafting",
+                "waiting_assets",
+                "ready_to_submit",
+                "submitted",
+                "follow_up_due",
+                "won",
+                "rejected",
+                "archived",
+            ]
+        ),
+    )
+    task_create.add_argument("--notes", default="")
+    task_create.set_defaults(func=task_create_command)
+
+    task_list = sub.add_parser("task-list", help="List managed submission tasks")
+    task_list.add_argument("--workspace", default="default")
+    task_list.add_argument("--submission-state", default="")
+    task_list.add_argument("--owner", default="")
+    task_list.add_argument(
+        "--bucket",
+        default="",
+        choices=["", "ready", "submitted", "followup", "blocked", "active", "today", "this_week", "closed"],
+    )
+    task_list.add_argument("--limit", type=int, default=40)
+    task_list.set_defaults(func=task_list_command)
+
+    task_view = sub.add_parser("task-view", help="Show a single managed submission task")
+    task_view.add_argument("task_id", type=int)
+    task_view.add_argument("--limit", type=int, default=20, help="Number of recent updates to include")
+    task_view.set_defaults(func=task_view_command)
+
+    task_update = sub.add_parser("task-update", help="Update managed submission task fields")
+    task_update.add_argument("task_id", type=int)
+    task_update.add_argument(
+        "--submission-state",
+        default=None,
+        choices=[
+            "not_started",
+            "researching",
+            "drafting",
+            "waiting_assets",
+            "ready_to_submit",
+            "submitted",
+            "follow_up_due",
+            "won",
+            "rejected",
+            "archived",
+        ],
+    )
+    task_update.add_argument("--owner", default=None)
+    task_update.add_argument("--due-date", default=None)
+    task_update.add_argument("--notes", default=None)
+    task_update.add_argument("--recommended-action", default=None)
+    task_update.set_defaults(func=task_update_command)
+
+    task_add_note = sub.add_parser("task-add-note", help="Append an activity note to a managed task")
+    task_add_note.add_argument("task_id", type=int)
+    task_add_note.add_argument("body", help="Note body")
+    task_add_note.set_defaults(func=task_add_note_command)
+
+    task_ready = sub.add_parser("task-ready", help="Mark task as ready_to_submit")
+    task_ready.add_argument("task_id", type=int)
+    task_ready.add_argument("--note", default="")
+    task_ready.set_defaults(func=task_ready_command)
+
+    task_submitted = sub.add_parser("task-submitted", help="Mark task as submitted and set follow-up due")
+    task_submitted.add_argument("task_id", type=int)
+    task_submitted.add_argument("--submitted-at", default="")
+    task_submitted.add_argument("--follow-up-days", type=int, default=14)
+    task_submitted.add_argument("--note", default="")
+    task_submitted.set_defaults(func=task_submitted_command)
+
+    task_followup = sub.add_parser("task-followup", help="Mark task as follow_up_due")
+    task_followup.add_argument("task_id", type=int)
+    task_followup.add_argument("--due-date", default="")
+    task_followup.add_argument("--note", default="")
+    task_followup.set_defaults(func=task_followup_command)
 
     return parser
 
