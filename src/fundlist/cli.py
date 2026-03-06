@@ -293,6 +293,12 @@ def build_parser() -> argparse.ArgumentParser:
     ops_list.add_argument("--limit", type=int, default=80)
     ops_list.add_argument("--speedrun-only", action="store_true")
     ops_list.add_argument("--include-no-deadline", action="store_true")
+    ops_list.add_argument(
+        "--bucket",
+        default="",
+        choices=["", "today", "overdue", "this_week", "later", "no_deadline"],
+        help="Optional deadline bucket filter",
+    )
     ops_list.set_defaults(func=ops_list_command)
 
     ops_watch = sub.add_parser(

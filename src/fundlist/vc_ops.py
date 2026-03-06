@@ -11,12 +11,13 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .fundraising import import_fundraising_files, parse_files_argument
+from .fundraising import extract_urls, import_fundraising_files, parse_files_argument
 from .store import ensure_parent_dir
 
 
 TERMINAL_STATUS = {"done", "rejected", "closed"}
 RUNNING_STATUS = {"in_progress", "submitted"}
+BUCKET_ORDER = {"today": 0, "overdue": 1, "this_week": 2, "later": 3, "no_deadline": 4}
 
 
 @dataclass
@@ -34,6 +35,12 @@ class SubmissionTask:
     source_row: int
     website: str
     notes: str
+    priority_score: int
+    priority_reason: str
+    fit_tags: str
+    submission_url: str
+    deadline_bucket: str
+    source_kind: str
     imported_at: str
 
 
@@ -82,6 +89,167 @@ def _days_mark(days_left: Optional[int]) -> str:
     if days_left >= 0:
         return f"D-{days_left}"
     return f"D+{abs(days_left)}"
+
+
+def _compute_deadline_bucket(deadline_date: str, days_left: Optional[int]) -> str:
+    if not deadline_date:
+        return "no_deadline"
+    if days_left is None:
+        return "later"
+    if days_left < 0:
+        return "overdue"
+    if days_left <= 1:
+        return "today"
+    if days_left <= 7:
+        return "this_week"
+    return "later"
+
+
+def _infer_source_kind(category: str, source_file: str) -> str:
+    low = category.lower().strip()
+    path = source_file.lower().strip()
+    if low.startswith("pdf_") or path.endswith(".pdf"):
+        return "pdf"
+    if path.startswith("http://") or path.startswith("https://"):
+        return "web"
+    return "structured"
+
+
+def _infer_fit_tags(category: str, org_name: str, notes: str, website: str) -> str:
+    blob = _normalize_text(" ".join([category, org_name, notes, website]))
+    tags: List[str] = []
+
+    def add(tag: str, markers: Sequence[str]) -> None:
+        if any(marker in blob for marker in markers) and tag not in tags:
+            tags.append(tag)
+
+    add("ai", [" ai ", "agent", "agents", "llm", "model", "inference", "gpu", "data", "ml "])
+    add("crypto", ["crypto", "web3", "blockchain", "defi", "nft", "token", "onchain", "solana", "ethereum"])
+    add("accelerator", ["accelerator", "cohort", "batch", "demo day", "program"])
+    add("grant", ["grant", "grants", "foundation"])
+    add("vc", [" venture ", " capital", " fund", "vc", "investor"])
+    add("apac", ["apac", "asia", "korea", "seoul", "japan", "singapore", "hong kong"])
+    add("us", ["usa", "united states", "new york", "san francisco", "sf", "silicon valley"])
+    add("global", ["global", "worldwide", "remote"])
+    add("seed", ["pre-seed", "preseed", "seed"])
+    add("series_a", ["series a", "series-a", "seriesa"])
+    add("outreach", ["email", "intro", "contact"])
+    return ",".join(tags[:6])
+
+
+def _detect_submission_url(website: str, notes: str) -> str:
+    if website.strip().startswith(("http://", "https://")):
+        return website.strip()
+    urls = extract_urls(" ".join([website, notes]))
+    return urls[0] if urls else ""
+
+
+def _compute_priority_score(
+    *,
+    category: str,
+    status_norm: str,
+    days_left: Optional[int],
+    deadline_bucket: str,
+    submission_url: str,
+    notes: str,
+    fit_tags: str,
+    is_speedrun: int,
+    source_kind: str,
+) -> int:
+    score = 0
+
+    if deadline_bucket == "overdue":
+        score += 45
+    elif days_left is None:
+        score += 6
+    elif days_left <= 1:
+        score += 40
+    elif days_left <= 3:
+        score += 36
+    elif days_left <= 7:
+        score += 30
+    elif days_left <= 14:
+        score += 20
+    else:
+        score += 10
+
+    score += {
+        "in_progress": 14,
+        "not_started": 12,
+        "submitted": 9,
+        "unknown": 7,
+        "done": 0,
+    }.get(status_norm, 6)
+
+    notes_blob = _normalize_text(notes)
+    if submission_url:
+        score += 10
+    if any(token in notes_blob for token in ["apply", "submit", "form", "deck", "document", "requirement", "링크", "지원"]):
+        score += 5
+
+    if is_speedrun:
+        score += 10
+
+    tags = [tag for tag in fit_tags.split(",") if tag]
+    score += min(15, len(tags) * 3)
+
+    if source_kind == "pdf":
+        score += 2
+
+    if category in {"web2_vc", "web3_vc", "vc_contact"} or category.startswith("xlsx:web"):
+        score += 4
+
+    return min(100, max(0, score))
+
+
+def _compute_priority_reason(
+    *,
+    deadline_bucket: str,
+    days_left: Optional[int],
+    submission_url: str,
+    is_speedrun: int,
+    fit_tags: str,
+    status_norm: str,
+    category: str,
+) -> str:
+    parts: List[str] = []
+    if deadline_bucket == "overdue":
+        parts.append(f"overdue {abs(days_left or 0)}d")
+    elif days_left is not None:
+        parts.append(_days_mark(days_left))
+    else:
+        parts.append("no deadline")
+
+    if submission_url:
+        parts.append("official URL")
+    if is_speedrun:
+        parts.append("speedrun/cohort")
+    elif category in {"web2_vc", "web3_vc", "vc_contact"} or category.startswith("xlsx:web"):
+        parts.append("outreach queue")
+    if status_norm in {"in_progress", "submitted"}:
+        parts.append(status_norm.replace("_", " "))
+
+    tag_parts = [tag for tag in fit_tags.split(",") if tag][:2]
+    if tag_parts:
+        parts.append("/".join(tag_parts))
+    return ", ".join(parts[:4])
+
+
+def _task_sort_key(task: SubmissionTask) -> Tuple[int, int, str, str]:
+    return (
+        BUCKET_ORDER.get(task.deadline_bucket, 99),
+        -int(task.priority_score),
+        task.deadline_date or "9999-12-31",
+        task.org_name.lower(),
+    )
+
+
+def _task_brief(task: SubmissionTask) -> str:
+    return (
+        f"- [{task.deadline_bucket}] score={task.priority_score} {_days_mark(task.days_left)} "
+        f"{task.org_name} | status={task.status_norm} | {task.priority_reason} | "
+        f"url={task.submission_url or task.website or '-'}"
+    )
 
 
 def _extract_raw_highlights(raw_json: str) -> List[Tuple[str, str]]:
@@ -181,7 +349,7 @@ def _build_program_detail_map(conn: sqlite3.Connection, tasks: Sequence[Submissi
 
 def _is_submission_category(category: str) -> bool:
     c = category.strip().lower()
-    if c in {"accelerator_program", "grants_program"}:
+    if c in {"accelerator_program", "grants_program", "web2_vc", "web3_vc", "vc_contact"}:
         return True
     if not c.startswith("xlsx:"):
         return False
@@ -196,8 +364,28 @@ def _is_submission_category(category: str) -> bool:
         "지원",
         "제출",
         "일정",
+        "web3 vc",
+        "web2 vc",
+        "contact",
+        "vc",
+        "fund",
+        "investor",
     ]
     return any(k in sheet for k in keywords)
+
+
+def _uses_submission_deadline(category: str, status_raw: str, notes: str) -> bool:
+    c = category.strip().lower()
+    if c in {"accelerator_program", "grants_program"}:
+        return True
+    if c.startswith("xlsx:"):
+        sheet = c.split(":", 1)[1].strip()
+        deadline_sheets = ["grant", "accelerator", "program", "apply", "application", "지원", "제출", "일정"]
+        if any(token in sheet for token in deadline_sheets):
+            return True
+    text = _normalize_text(f"{status_raw} {notes}")
+    deadline_markers = ["deadline", "apply by", "applications due", "cohort", "batch", "마감"]
+    return any(marker in text for marker in deadline_markers)
 
 
 def _parse_yyyymmdd(text: str) -> List[date]:
@@ -379,7 +567,7 @@ def _build_tasks(rows: Sequence[sqlite3.Row], today: date) -> List[SubmissionTas
 
         status_norm = _normalize_status(status_raw=status_raw, notes=notes)
         joined = " | ".join([status_raw, date_text, notes])
-        candidates = _extract_dates(joined)
+        candidates = _extract_dates(joined) if _uses_submission_deadline(category, status_raw, notes) else []
         deadline = _pick_deadline(candidates, today=today)
         deadline_date = deadline.isoformat() if deadline else ""
         days_left = (deadline - today).days if deadline else None
@@ -387,6 +575,30 @@ def _build_tasks(rows: Sequence[sqlite3.Row], today: date) -> List[SubmissionTas
         speedrun_blob = _normalize_text(f"{org_name} {notes} {website}")
         is_speedrun = 1 if ("speedrun" in speedrun_blob or "스피드런" in speedrun_blob) else 0
         is_active = 0 if status_norm in TERMINAL_STATUS else 1
+        submission_url = _detect_submission_url(website=website, notes=notes)
+        source_kind = _infer_source_kind(category=category, source_file=source_file)
+        fit_tags = _infer_fit_tags(category=category, org_name=org_name, notes=notes, website=website)
+        deadline_bucket = _compute_deadline_bucket(deadline_date=deadline_date, days_left=days_left)
+        priority_score = _compute_priority_score(
+            category=category,
+            status_norm=status_norm,
+            days_left=days_left,
+            deadline_bucket=deadline_bucket,
+            submission_url=submission_url,
+            notes=notes,
+            fit_tags=fit_tags,
+            is_speedrun=is_speedrun,
+            source_kind=source_kind,
+        )
+        priority_reason = _compute_priority_reason(
+            deadline_bucket=deadline_bucket,
+            days_left=days_left,
+            submission_url=submission_url,
+            is_speedrun=is_speedrun,
+            fit_tags=fit_tags,
+            status_norm=status_norm,
+            category=category,
+        )
 
         task_key = _build_task_key(
             category=category,
@@ -410,19 +622,24 @@ def _build_tasks(rows: Sequence[sqlite3.Row], today: date) -> List[SubmissionTas
                 source_row=source_row,
                 website=website,
                 notes=notes[:800],
+                priority_score=priority_score,
+                priority_reason=priority_reason,
+                fit_tags=fit_tags,
+                submission_url=submission_url,
+                deadline_bucket=deadline_bucket,
+                source_kind=source_kind,
                 imported_at=imported_at,
             )
         )
 
-    tasks.sort(
-        key=lambda t: (
-            t.deadline_date == "",
-            t.deadline_date or "9999-12-31",
-            t.category,
-            t.org_name,
-        )
-    )
+    tasks.sort(key=_task_sort_key)
     return tasks
+
+
+def _ensure_table_column(conn: sqlite3.Connection, table: str, column: str, spec: str) -> None:
+    cols = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {spec}")
 
 
 def _ensure_ops_schema(conn: sqlite3.Connection) -> None:
@@ -442,16 +659,31 @@ def _ensure_ops_schema(conn: sqlite3.Connection) -> None:
           source_row INTEGER NOT NULL,
           website TEXT NOT NULL,
           notes TEXT NOT NULL,
+          priority_score INTEGER NOT NULL DEFAULT 0,
+          priority_reason TEXT NOT NULL DEFAULT '',
+          fit_tags TEXT NOT NULL DEFAULT '',
+          submission_url TEXT NOT NULL DEFAULT '',
+          deadline_bucket TEXT NOT NULL DEFAULT '',
+          source_kind TEXT NOT NULL DEFAULT 'structured',
           imported_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         )
         """
     )
+    _ensure_table_column(conn, "vc_submission_tasks", "priority_score", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_table_column(conn, "vc_submission_tasks", "priority_reason", "TEXT NOT NULL DEFAULT ''")
+    _ensure_table_column(conn, "vc_submission_tasks", "fit_tags", "TEXT NOT NULL DEFAULT ''")
+    _ensure_table_column(conn, "vc_submission_tasks", "submission_url", "TEXT NOT NULL DEFAULT ''")
+    _ensure_table_column(conn, "vc_submission_tasks", "deadline_bucket", "TEXT NOT NULL DEFAULT ''")
+    _ensure_table_column(conn, "vc_submission_tasks", "source_kind", "TEXT NOT NULL DEFAULT 'structured'")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_vc_tasks_deadline ON vc_submission_tasks(deadline_date, is_active)"
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_vc_tasks_speedrun ON vc_submission_tasks(is_speedrun, deadline_date)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_vc_tasks_bucket_priority ON vc_submission_tasks(deadline_bucket, priority_score DESC)"
     )
     conn.execute(
         """
@@ -497,8 +729,9 @@ def _replace_tasks(conn: sqlite3.Connection, tasks: Sequence[SubmissionTask]) ->
             """
             INSERT INTO vc_submission_tasks (
               task_key, category, org_name, status_raw, status_norm, deadline_date, days_left,
-              is_speedrun, is_active, source_file, source_row, website, notes, imported_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              is_speedrun, is_active, source_file, source_row, website, notes, priority_score,
+              priority_reason, fit_tags, submission_url, deadline_bucket, source_kind, imported_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -515,6 +748,12 @@ def _replace_tasks(conn: sqlite3.Connection, tasks: Sequence[SubmissionTask]) ->
                     t.source_row,
                     t.website,
                     t.notes,
+                    t.priority_score,
+                    t.priority_reason,
+                    t.fit_tags,
+                    t.submission_url,
+                    t.deadline_bucket,
+                    t.source_kind,
                     t.imported_at,
                     now,
                 )
@@ -563,6 +802,9 @@ def _to_snapshot_payload(tasks: Sequence[SubmissionTask], alert_days: int) -> Di
     overdue = [t for t in tasks if t.is_active and t.days_left is not None and t.days_left < 0]
     speedrun = [t for t in tasks if t.is_speedrun]
     speedrun_started = any(t.status_norm in RUNNING_STATUS.union(TERMINAL_STATUS) for t in speedrun)
+    by_bucket: Dict[str, int] = {}
+    for t in tasks:
+        by_bucket[t.deadline_bucket] = by_bucket.get(t.deadline_bucket, 0) + 1
 
     by_category: Dict[str, int] = {}
     for t in tasks:
@@ -579,6 +821,8 @@ def _to_snapshot_payload(tasks: Sequence[SubmissionTask], alert_days: int) -> Di
                     "days_left": t.days_left,
                     "status_norm": t.status_norm,
                     "is_speedrun": t.is_speedrun,
+                    "priority_score": t.priority_score,
+                    "deadline_bucket": t.deadline_bucket,
                 }
             )
         if len(nearest) >= 20:
@@ -592,7 +836,18 @@ def _to_snapshot_payload(tasks: Sequence[SubmissionTask], alert_days: int) -> Di
         "speedrun_started": bool(speedrun_started),
         "speedrun_task_count": len(speedrun),
         "by_category": by_category,
+        "by_bucket": by_bucket,
         "nearest_deadlines": nearest,
+        "top_priority": [
+            {
+                "org_name": t.org_name,
+                "deadline_bucket": t.deadline_bucket,
+                "priority_score": t.priority_score,
+                "priority_reason": t.priority_reason,
+                "submission_url": t.submission_url,
+            }
+            for t in list(tasks)[:10]
+        ],
     }
 
 
@@ -688,6 +943,15 @@ def _emit_events(conn: sqlite3.Connection, tasks: Sequence[SubmissionTask], aler
     return added
 
 
+def _append_task_section(lines: List[str], title: str, tasks: Sequence[SubmissionTask], limit: int) -> None:
+    lines.extend(["", f"## {title}"])
+    if not tasks:
+        lines.append("- none")
+        return
+    for task in list(tasks)[:limit]:
+        lines.append(_task_brief(task))
+
+
 def _render_ops_report(
     output_path: str,
     *,
@@ -700,15 +964,15 @@ def _render_ops_report(
     out = Path(output_path).expanduser()
     ensure_parent_dir(str(out))
 
-    upcoming = [
-        t
-        for t in tasks
-        if t.is_active and t.days_left is not None and t.days_left >= 0 and t.days_left <= alert_days
-    ]
-    overdue = [t for t in tasks if t.is_active and t.days_left is not None and t.days_left < 0]
-    no_deadline = [t for t in tasks if t.is_active and not t.deadline_date][:20]
-    speedrun_tasks = [t for t in tasks if t.is_speedrun]
+    active_tasks = [t for t in tasks if t.is_active]
+    today_tasks = [t for t in active_tasks if t.deadline_bucket == "today"]
+    overdue = [t for t in active_tasks if t.deadline_bucket == "overdue"]
+    this_week = [t for t in active_tasks if t.deadline_bucket == "this_week"]
+    later = [t for t in active_tasks if t.deadline_bucket == "later"]
+    no_deadline = [t for t in active_tasks if t.deadline_bucket == "no_deadline"]
+    speedrun_tasks = [t for t in active_tasks if t.is_speedrun]
     speedrun_started = bool(snapshot_payload.get("speedrun_started"))
+    top_priority = active_tasks[:10]
 
     lines = [
         "# VC Ops Assistant Report",
@@ -719,52 +983,25 @@ def _render_ops_report(
         f"- Total tracked tasks: {snapshot_payload.get('task_count', 0)}",
         f"- Active tasks: {snapshot_payload.get('active_task_count', 0)}",
         f"- Deadline alert window: {alert_days} days",
+        f"- Today: {len(today_tasks)}",
+        f"- This week: {len(this_week)}",
+        f"- Overdue: {len(overdue)}",
+        f"- No deadline: {len(no_deadline)}",
         "",
-        "## Speedrun Check",
+        "## Snapshot",
+        f"- Top priority count: {len(top_priority)}",
+        f"- Speedrun tasks: {len(speedrun_tasks)}",
         f"- Speedrun detected: {'yes' if speedrun_tasks else 'no'}",
         f"- Speedrun started: {'yes' if speedrun_started else 'no'}",
     ]
-    if speedrun_tasks:
-        for t in speedrun_tasks[:10]:
-            lines.append(
-                f"- [{t.category}] {t.org_name} | status={t.status_norm} | deadline={t.deadline_date or '-'}"
-            )
 
-    lines.extend(["", "## Deadline Alerts"])
-    if upcoming:
-        for t in upcoming[:30]:
-            lines.append(
-                f"- D-{t.days_left}: [{t.category}] {t.org_name} | status={t.status_norm} | deadline={t.deadline_date}"
-            )
-    else:
-        lines.append("- none")
-
-    lines.extend(["", "## Overdue"])
-    if overdue:
-        for t in overdue[:30]:
-            lines.append(
-                f"- +{abs(t.days_left or 0)}d: [{t.category}] {t.org_name} | status={t.status_norm} | deadline={t.deadline_date}"
-            )
-    else:
-        lines.append("- none")
-
-    lines.extend(["", "## Queue By Date"])
-    queue = [t for t in tasks if t.is_active and t.deadline_date][:40]
-    if queue:
-        for t in queue:
-            d_mark = f"D-{t.days_left}" if (t.days_left is not None and t.days_left >= 0) else f"D+{abs(t.days_left or 0)}"
-            lines.append(
-                f"- {t.deadline_date}: [{t.category}] {t.org_name} | {d_mark} | status={t.status_norm}"
-            )
-    else:
-        lines.append("- none")
-
-    lines.extend(["", "## Active Without Deadline"])
-    if no_deadline:
-        for t in no_deadline:
-            lines.append(f"- [{t.category}] {t.org_name} | status={t.status_norm} | site={t.website or '-'}")
-    else:
-        lines.append("- none")
+    _append_task_section(lines, "Top Priority", top_priority, limit=10)
+    _append_task_section(lines, "Today", today_tasks, limit=20)
+    _append_task_section(lines, "Overdue", overdue, limit=20)
+    _append_task_section(lines, "This Week", this_week, limit=25)
+    _append_task_section(lines, "Later", later, limit=25)
+    _append_task_section(lines, "Speedrun / Cohort", speedrun_tasks, limit=15)
+    _append_task_section(lines, "No Deadline / Outreach Queue", no_deadline, limit=25)
 
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return str(out)
@@ -817,7 +1054,8 @@ def _render_program_report(
     lines.extend(["", "## Priority Queue"])
     for t in tasks[:20]:
         lines.append(
-            f"- {_days_mark(t.days_left)} | deadline={t.deadline_date or '-'} | [{t.category}] {t.org_name} | status={t.status_norm}"
+            f"- score={t.priority_score} | bucket={t.deadline_bucket} | {_days_mark(t.days_left)} | "
+            f"deadline={t.deadline_date or '-'} | [{t.category}] {t.org_name} | {t.priority_reason}"
         )
 
     lines.extend(["", "## Submission Dossier"])
@@ -828,8 +1066,11 @@ def _render_program_report(
                 "",
                 f"### {idx}. {t.org_name}",
                 f"- Status: {t.status_norm} (raw: {t.status_raw or '-'})",
+                f"- Priority: {t.priority_score} ({t.priority_reason or '-'})",
+                f"- Deadline bucket: {t.deadline_bucket}",
                 f"- Deadline: {t.deadline_date or '-'} ({_days_mark(t.days_left)})",
-                f"- Apply URL: {d.get('website') or t.website or '-'}",
+                f"- Apply URL: {t.submission_url or d.get('website') or t.website or '-'}",
+                f"- Fit tags: {t.fit_tags or '-'}",
                 f"- Contact: {d.get('contact_name') or '-'}",
                 f"- Email: {d.get('email') or '-'}",
                 f"- Region: {d.get('region') or '-'}",
@@ -860,7 +1101,9 @@ def _render_program_report(
 
     lines.extend(["", "## Immediate Next Actions"])
     top = tasks[0]
-    lines.append(f"- Top priority: {top.org_name} ({_days_mark(top.days_left)}, deadline={top.deadline_date or '-'})")
+    lines.append(
+        f"- Top priority: {top.org_name} (score={top.priority_score}, {_days_mark(top.days_left)}, deadline={top.deadline_date or '-'})"
+    )
     lines.append("- Today: 제출 URL/필수 문항/첨부 요구사항 점검 후 체크리스트 확정")
     lines.append("- Next 24h: 피치덱/원페이지 최신화 및 필수 KPI 수치 동기화")
     lines.append("- Next 48h: 모의 제출 1회 후 최종 제출")
@@ -877,14 +1120,20 @@ def _query_tasks_for_list(
     limit: int,
     speedrun_only: bool,
     include_no_deadline: bool,
+    bucket: str,
 ) -> List[sqlite3.Row]:
     conn.row_factory = sqlite3.Row
     where = ["is_active = 1"]
     args: List[object] = []
     if speedrun_only:
         where.append("is_speedrun = 1")
+    if bucket.strip():
+        where.append("deadline_bucket = ?")
+        args.append(bucket.strip())
 
-    if include_no_deadline:
+    if bucket.strip() == "no_deadline":
+        pass
+    elif include_no_deadline:
         where.append(
             "(deadline_date = '' OR (days_left IS NOT NULL AND days_left >= ? AND days_left <= ?))"
         )
@@ -899,11 +1148,19 @@ def _query_tasks_for_list(
     sql = f"""
         SELECT
           category, org_name, status_norm, deadline_date, days_left,
-          is_speedrun, website, source_file, source_row
+          is_speedrun, website, source_file, source_row, priority_score, priority_reason,
+          fit_tags, submission_url, deadline_bucket
         FROM vc_submission_tasks
         WHERE {" AND ".join(where)}
         ORDER BY
-          CASE WHEN deadline_date = '' THEN 1 ELSE 0 END,
+          CASE deadline_bucket
+            WHEN 'today' THEN 0
+            WHEN 'overdue' THEN 1
+            WHEN 'this_week' THEN 2
+            WHEN 'later' THEN 3
+            ELSE 4
+          END,
+          priority_score DESC,
           deadline_date ASC,
           org_name ASC
         LIMIT ?
@@ -1019,13 +1276,7 @@ def ops_program_report_command(args: argparse.Namespace) -> int:
 
     all_tasks = list(result.get("tasks", []))
     matched = [t for t in all_tasks if t.is_active and _matches_program(t, args.program)]
-    matched.sort(
-        key=lambda t: (
-            t.deadline_date == "",
-            t.deadline_date or "9999-12-31",
-            t.org_name,
-        )
-    )
+    matched.sort(key=_task_sort_key)
 
     conn = sqlite3.connect(args.db)
     _ensure_ops_schema(conn)
@@ -1061,6 +1312,7 @@ def ops_list_command(args: argparse.Namespace) -> int:
         limit=args.limit,
         speedrun_only=args.speedrun_only,
         include_no_deadline=args.include_no_deadline,
+        bucket=args.bucket,
     )
     conn.close()
     if not rows:
@@ -1078,13 +1330,17 @@ def ops_list_command(args: argparse.Namespace) -> int:
         print(
             " | ".join(
                 [
+                    row["deadline_bucket"] or "-",
+                    f"score={row['priority_score']}",
                     row["deadline_date"] or "-",
                     d_mark,
                     row["category"],
                     row["org_name"],
                     row["status_norm"],
                     "speedrun" if int(row["is_speedrun"] or 0) else "-",
-                    row["website"] or "-",
+                    row["submission_url"] or row["website"] or "-",
+                    row["priority_reason"] or "-",
+                    row["fit_tags"] or "-",
                 ]
             )
         )

@@ -601,6 +601,10 @@ def handle_command(
                     "/ops_sync",
                     "/ops_report",
                     "/ops_list [days]",
+                    "/ops_today",
+                    "/ops_week",
+                    "/ops_speedrun",
+                    "/ops_program <program-keyword>",
                     "/submit_report <program-keyword>",
                     "/ops_push",
                     "/submission_scan [query]",
@@ -759,9 +763,48 @@ def handle_command(
         client.send_message(chat_id, format_command_result("ops-list", code, out, max_lines=50))
         return
 
-    if cmd == "/submit_report":
+    if cmd == "/ops_today":
+        run_cmd = fundlist + [
+            "ops-list",
+            "--bucket",
+            "today",
+            "--limit",
+            "20",
+        ]
+        code, out = run_local_command(run_cmd, timeout_sec=120)
+        client.send_message(chat_id, format_command_result("ops-today", code, out, max_lines=40))
+        return
+
+    if cmd == "/ops_week":
+        run_cmd = fundlist + [
+            "ops-list",
+            "--bucket",
+            "this_week",
+            "--limit",
+            "25",
+        ]
+        code, out = run_local_command(run_cmd, timeout_sec=120)
+        client.send_message(chat_id, format_command_result("ops-week", code, out, max_lines=50))
+        return
+
+    if cmd == "/ops_speedrun":
+        run_cmd = fundlist + [
+            "submission-report",
+            "--limit",
+            os.environ.get("VC_SUBMISSION_REPORT_LIMIT", "60"),
+            "--min-score",
+            os.environ.get("VC_SUBMISSION_MIN_SCORE", "8"),
+            "--output",
+            str(DEFAULT_SUBMISSION_REPORT),
+        ]
+        code, out = run_local_command(run_cmd, timeout_sec=180)
+        msg = [format_command_result("ops-speedrun", code, out, max_lines=30), "", read_report(DEFAULT_SUBMISSION_REPORT)]
+        client.send_message(chat_id, "\n".join(msg))
+        return
+
+    if cmd in {"/submit_report", "/ops_program"}:
         if not arg:
-            client.send_message(chat_id, "usage: /submit_report <program-keyword> (예: /submit_report alliance dao)")
+            client.send_message(chat_id, "usage: /ops_program <program-keyword> (예: /ops_program alliance dao)")
             return
         keyword = arg.strip()
         slug = program_slug(keyword)
@@ -777,16 +820,21 @@ def handle_command(
             str(report_path),
         ]
         code, out = run_local_command(run_cmd, timeout_sec=900)
-        msg = [format_command_result("submit-report", code, out), "", read_report(report_path)]
+        msg = [format_command_result("ops-program", code, out), "", read_report(report_path)]
         client.send_message(chat_id, "\n".join(msg))
         return
 
     if cmd == "/ops_push":
+        push_mode = "morning"
+        if arg and arg.strip().lower() in {"morning", "evening"}:
+            push_mode = arg.strip().lower()
         run_cmd = [
             py,
             str(ROOT / "scripts" / "push_telegram_reports.py"),
             "--chat-id",
             str(chat_id),
+            "--mode",
+            push_mode,
         ]
         code, out = run_local_command(run_cmd, timeout_sec=300)
         client.send_message(chat_id, format_command_result("ops-push", code, out, max_lines=40))

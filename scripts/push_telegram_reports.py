@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import sys
 import urllib.request
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ ENV_FILE = CONTEXT_DIR / "telegram.env"
 BOT_LOG = CONTEXT_DIR / "telegram_bot.log"
 PUSH_LOG = CONTEXT_DIR / "telegram_report_push.log"
 DEFAULT_OPS_REPORT = ROOT / "data" / "reports" / "vc_ops_report.md"
+DEFAULT_DB = Path(os.environ.get("FUNDLIST_DB", str(ROOT / "data" / "investment_items.db")))
 DEFAULT_PROGRAM_DIR = ROOT / "data" / "reports" / "program_reports"
 DEFAULT_SUBMISSION_REPORT = ROOT / "data" / "reports" / "submission_targets_report.md"
 DEFAULT_SUBMISSION_JSON = ROOT / "data" / "reports" / "submission_targets.json"
@@ -115,42 +117,137 @@ def read_excerpt(path: Path, *, max_lines: int = 80, max_chars: int = 2800) -> s
     return text
 
 
-def parse_ops_digest(path: Path) -> str:
-    if not path.exists():
-        return f"(missing) {path}"
-    lines = path.read_text(encoding="utf-8").splitlines()
-    wanted_prefixes = [
-        "- Generated (UTC):",
-        "- Total tracked tasks:",
-        "- Active tasks:",
-        "- Deadline alert window:",
+def _days_mark(days_left: Optional[int]) -> str:
+    if days_left is None:
+        return "D?"
+    if days_left >= 0:
+        return f"D-{days_left}"
+    return f"D+{abs(days_left)}"
+
+
+def _bucket_sort_value(bucket: str) -> int:
+    return {"today": 0, "overdue": 1, "this_week": 2, "later": 3, "no_deadline": 4}.get(bucket, 9)
+
+
+def _load_ops_rows(db_path: Path) -> List[sqlite3.Row]:
+    if not db_path.exists():
+        return []
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+              org_name, deadline_bucket, deadline_date, days_left, status_norm, is_speedrun,
+              priority_score, priority_reason, submission_url, website, fit_tags
+            FROM vc_submission_tasks
+            WHERE is_active = 1
+            ORDER BY
+              CASE deadline_bucket
+                WHEN 'today' THEN 0
+                WHEN 'overdue' THEN 1
+                WHEN 'this_week' THEN 2
+                WHEN 'later' THEN 3
+                ELSE 4
+              END,
+              priority_score DESC,
+              deadline_date ASC,
+              org_name ASC
+            LIMIT 240
+            """
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        rows = []
+    finally:
+        conn.close()
+    return rows
+
+
+def _load_recent_events(db_path: Path, limit: int = 6) -> List[sqlite3.Row]:
+    if not db_path.exists():
+        return []
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT created_at, event_type, title, body
+            FROM vc_ops_events
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        rows = []
+    finally:
+        conn.close()
+    return rows
+
+
+def _format_task_line(idx: int, row: sqlite3.Row) -> str:
+    url = str(row["submission_url"] or row["website"] or "").strip()
+    reason = str(row["priority_reason"] or "").strip()
+    return (
+        f"{idx}. {row['org_name']} | {_days_mark(row['days_left'])} | "
+        f"score={row['priority_score']} | {row['status_norm']} | "
+        f"{reason or '-'} | {url or '-'}"
+    )
+
+
+def build_ops_digest(db_path: Path, report_path: Path, *, mode: str = "morning") -> str:
+    rows = _load_ops_rows(db_path)
+    if not rows:
+        if not report_path.exists():
+            return f"(missing) {report_path}"
+        return "[VC OPS]\n" + read_excerpt(report_path, max_lines=50, max_chars=2200)
+
+    by_bucket: Dict[str, List[sqlite3.Row]] = {}
+    for row in rows:
+        bucket = str(row["deadline_bucket"] or "no_deadline")
+        by_bucket.setdefault(bucket, []).append(row)
+    speedrun_rows = [row for row in rows if int(row["is_speedrun"] or 0)]
+
+    title = "[VC OPS EVENING]" if mode == "evening" else "[VC OPS MORNING]"
+    out = [title, f"- generated: {now_utc_iso()}", f"- active rows: {len(rows)}"]
+
+    if mode == "evening":
+        out.extend(["", "today changes:"])
+        recent_events = _load_recent_events(db_path, limit=6)
+        if recent_events:
+            for event in recent_events:
+                out.append(f"- {event['title']} | {str(event['body'])[:140]}")
+        else:
+            out.append("- none")
+
+        out.extend(["", "tomorrow top 3:"])
+        tomorrow_candidates = by_bucket.get("today", []) + by_bucket.get("overdue", [])
+        if tomorrow_candidates:
+            for idx, row in enumerate(tomorrow_candidates[:3], start=1):
+                out.append(_format_task_line(idx, row))
+        else:
+            out.append("- none")
+
+        out.extend(["", "watchlist later:"])
+        for idx, row in enumerate(by_bucket.get("this_week", [])[:5], start=1):
+            out.append(_format_task_line(idx, row))
+        if not by_bucket.get("this_week"):
+            out.append("- none")
+        return "\n".join(out)
+
+    sections = [
+        ("today", by_bucket.get("today", []) + by_bucket.get("overdue", []), 5),
+        ("this week", by_bucket.get("this_week", []), 6),
+        ("new speedrun / cohort", speedrun_rows, 5),
+        ("no deadline / outreach", by_bucket.get("no_deadline", []), 6),
     ]
-    out: List[str] = ["[OPS DIGEST]"]
-    for pref in wanted_prefixes:
-        for ln in lines:
-            if ln.startswith(pref):
-                out.append(ln)
-                break
-
-    speedrun_rows = [ln for ln in lines if ln.startswith("- Speedrun ") or ln.startswith("- [accelerator_program]")]
-    if speedrun_rows:
-        out.append("")
-        out.append("speedrun:")
-        out.extend(speedrun_rows[:3])
-
-    alert_rows: List[str] = []
-    for i, ln in enumerate(lines):
-        if ln.strip() == "## Deadline Alerts":
-            for row in lines[i + 1 :]:
-                if row.startswith("## "):
-                    break
-                if row.startswith("- "):
-                    alert_rows.append(row)
-            break
-    if alert_rows:
-        out.append("")
-        out.append("deadline alerts:")
-        out.extend(alert_rows[:5])
+    for title_text, section_rows, limit in sections:
+        out.extend(["", f"{title_text}:"])
+        if section_rows:
+            for idx, row in enumerate(section_rows[:limit], start=1):
+                out.append(_format_task_line(idx, row))
+        else:
+            out.append("- none")
     return "\n".join(out)
 
 
@@ -280,12 +377,14 @@ def send_message(token: str, chat_id: int, text: str) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Push VC reports to Telegram channel/chat")
     p.add_argument("--chat-id", default="", help="Override telegram chat id")
+    p.add_argument("--db", default=str(DEFAULT_DB))
     p.add_argument("--ops-report", default=str(DEFAULT_OPS_REPORT))
     p.add_argument("--programs", default=os.environ.get("VC_OPS_PROGRAMS", "alliance dao"))
     p.add_argument("--program-dir", default=str(DEFAULT_PROGRAM_DIR))
     p.add_argument("--submission-report", default=str(DEFAULT_SUBMISSION_REPORT))
     p.add_argument("--submission-json", default=str(DEFAULT_SUBMISSION_JSON))
     p.add_argument("--submission-top-n", type=int, default=int(os.environ.get("VC_SUBMISSION_TOP_N", "8")))
+    p.add_argument("--mode", choices=["morning", "evening"], default=os.environ.get("VC_OPS_PUSH_MODE", "morning"))
     p.add_argument("--dry-run", action="store_true")
     return p
 
@@ -295,7 +394,7 @@ def main() -> int:
     args = build_parser().parse_args()
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    if not token:
+    if not token and not args.dry_run:
         print("TELEGRAM_BOT_TOKEN missing", file=sys.stderr)
         log_line("skip: TELEGRAM_BOT_TOKEN missing")
         return 2
@@ -305,24 +404,18 @@ def main() -> int:
         chat_id = parse_int(args.chat_id)
     if chat_id is None:
         chat_id = detect_chat_id()
-    if chat_id is None:
+    if chat_id is None and not args.dry_run:
         print("telegram chat id not found (set TELEGRAM_REPORT_CHAT_ID)", file=sys.stderr)
         log_line("skip: chat id not found")
         return 2
 
     programs = [p.strip() for p in args.programs.split(",") if p.strip()]
+    db_path = Path(args.db).expanduser()
     ops_path = Path(args.ops_report).expanduser()
     program_dir = Path(args.program_dir).expanduser()
     submission_path = Path(args.submission_report).expanduser()
     submission_json = Path(args.submission_json).expanduser()
-
-    header = (
-        f"[VC Auto Report] {now_utc_iso()}\n"
-        f"- chat_id: {chat_id}\n"
-        f"- programs: {', '.join(programs) if programs else '-'}"
-    )
-
-    sections: List[str] = [header, parse_ops_digest(ops_path)]
+    sections: List[str] = [build_ops_digest(db_path, ops_path, mode=args.mode)]
 
     if os.environ.get("VC_OPS_INCLUDE_SUBMISSION_REPORT", "1").strip() != "0":
         sections.append(parse_submission_digest(submission_path, submission_json, top_n=args.submission_top_n))
@@ -335,7 +428,7 @@ def main() -> int:
 
     if args.dry_run:
         print("\n\n---\n\n".join(sections))
-        log_line(f"dry-run chat_id={chat_id} sections={len(sections)}")
+        log_line(f"dry-run chat_id={chat_id or 0} sections={len(sections)}")
         return 0
 
     total_chunks = 0

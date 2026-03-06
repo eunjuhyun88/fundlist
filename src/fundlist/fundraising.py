@@ -18,7 +18,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from .store import ensure_parent_dir
 
 
-DEFAULT_FUNDRAISE_FILES = [
+FUNDRAISE_FILE_CANDIDATES = [
+    "/Users/ej/Downloads/문서/VC_Fundraising/2025-2026 Fund Raising.xlsx",
     "/Users/ej/Downloads/2025-2026 Fund Raising - Web2 VC.csv",
     "/Users/ej/Downloads/2025-2026 Fund Raising - Web3 VC.csv",
     "/Users/ej/Downloads/2025-2026 Fund Raising - grants program.csv",
@@ -27,6 +28,14 @@ DEFAULT_FUNDRAISE_FILES = [
     "/Users/ej/Downloads/2025-2026 Fund Raising - Email From Pitchdeck.tsv",
     "/Users/ej/Downloads/2025-2026 Fund Raising.xlsx",
 ]
+
+
+def _existing_default_fundraise_files() -> List[str]:
+    existing = [path for path in FUNDRAISE_FILE_CANDIDATES if Path(path).exists()]
+    return existing if existing else FUNDRAISE_FILE_CANDIDATES
+
+
+DEFAULT_FUNDRAISE_FILES = _existing_default_fundraise_files()
 
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
