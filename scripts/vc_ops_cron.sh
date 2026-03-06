@@ -16,10 +16,15 @@ if [[ -f "$ENV_FILE" ]]; then
   eval "$(/usr/bin/python3 "$REPO_DIR/scripts/load_env_exports.py" "$ENV_FILE")"
 fi
 
-/usr/bin/python3 "$REPO_DIR/fundlist.py" ops-sync \
-  --alert-days "${VC_OPS_ALERT_DAYS:-14}" \
-  --output "$REPO_DIR/data/reports/vc_ops_report.md" \
-  >> "$LOG_FILE" 2>&1
+OPS_SYNC_ARGS=(
+  --alert-days "${VC_OPS_ALERT_DAYS:-14}"
+  --output "$REPO_DIR/data/reports/vc_ops_report.md"
+)
+if [[ -n "${VC_FUNDRAISE_FILES:-}" ]]; then
+  OPS_SYNC_ARGS+=(--files "$VC_FUNDRAISE_FILES")
+fi
+
+/usr/bin/python3 "$REPO_DIR/fundlist.py" ops-sync "${OPS_SYNC_ARGS[@]}" >> "$LOG_FILE" 2>&1
 
 PROGRAMS_RAW="${VC_OPS_PROGRAMS:-}"
 PROGRAM_WATCHLIST_FILE="${VC_OPS_PROGRAM_FILE:-$CONFIG_DIR/program_watchlist.txt}"
@@ -49,17 +54,35 @@ for program in "${programs[@]}"; do
 done
 
 if [[ "${VC_SUBMISSION_SCAN:-1}" != "0" ]]; then
+  FULL_SWEEP="${VC_SUBMISSION_FULL_SWEEP:-0}"
+  DEFAULT_MAX_SITES="120"
+  DEFAULT_FUNDRAISE_SEED_LIMIT="300"
+  DEFAULT_REPORT_LIMIT="120"
+  DEFAULT_MAX_RESULTS="10"
+  if [[ "$FULL_SWEEP" == "1" ]]; then
+    DEFAULT_MAX_SITES="500"
+    DEFAULT_FUNDRAISE_SEED_LIMIT="5000"
+    DEFAULT_REPORT_LIMIT="500"
+    DEFAULT_MAX_RESULTS="0"
+  fi
   SUBMISSION_ARGS=(
-    --max-sites "${VC_SUBMISSION_MAX_SITES:-120}"
+    --max-sites "${VC_SUBMISSION_MAX_SITES:-$DEFAULT_MAX_SITES}"
     --max-pages-per-site "${VC_SUBMISSION_MAX_PAGES:-6}"
-    --max-results-per-query "${VC_SUBMISSION_MAX_RESULTS_PER_QUERY:-10}"
+    --max-results-per-query "${VC_SUBMISSION_MAX_RESULTS_PER_QUERY:-$DEFAULT_MAX_RESULTS}"
     --http-timeout "${VC_SUBMISSION_HTTP_TIMEOUT:-8}"
     --min-score "${VC_SUBMISSION_MIN_SCORE:-4}"
     --event-limit "${VC_SUBMISSION_EVENT_LIMIT:-20}"
+    --report-limit "${VC_SUBMISSION_REPORT_LIMIT:-$DEFAULT_REPORT_LIMIT}"
     --output "$REPO_DIR/data/reports/submission_targets_report.md"
   )
   if [[ "${VC_SUBMISSION_JSON_OUTPUT:-1}" != "0" ]]; then
     SUBMISSION_ARGS+=(--json-output "$REPO_DIR/data/reports/submission_targets.json")
+  fi
+  if [[ "$FULL_SWEEP" == "1" || "${VC_SUBMISSION_SKIP_SEARCH:-0}" == "1" ]]; then
+    SUBMISSION_ARGS+=(--skip-search)
+  fi
+  if [[ -n "${VC_SUBMISSION_SEED_URLS:-}" ]]; then
+    SUBMISSION_ARGS+=(--seed-urls "$VC_SUBMISSION_SEED_URLS")
   fi
   QUERY_FILE="${VC_SUBMISSION_QUERY_FILE:-$CONFIG_DIR/submission_queries.txt}"
   if [[ -f "$QUERY_FILE" ]]; then
@@ -68,7 +91,7 @@ if [[ "${VC_SUBMISSION_SCAN:-1}" != "0" ]]; then
   if [[ "${VC_SUBMISSION_USE_FUNDRAISE_SEEDS:-1}" != "1" ]]; then
     SUBMISSION_ARGS+=(--no-fundraise-seeds)
   else
-    SUBMISSION_ARGS+=(--fundraise-seed-limit "${VC_SUBMISSION_FUNDRAISE_SEED_LIMIT:-300}")
+    SUBMISSION_ARGS+=(--fundraise-seed-limit "${VC_SUBMISSION_FUNDRAISE_SEED_LIMIT:-$DEFAULT_FUNDRAISE_SEED_LIMIT}")
   fi
   /usr/bin/python3 "$REPO_DIR/fundlist.py" submission-scan "${SUBMISSION_ARGS[@]}" >> "$LOG_FILE" 2>&1 || true
 fi

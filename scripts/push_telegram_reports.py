@@ -204,6 +204,7 @@ def build_ops_digest(db_path: Path, report_path: Path, *, mode: str = "morning")
         for item in submission_items
         if str(item.get("status", "")).lower() in {"open", "rolling"} and int(item.get("score", 0) or 0) >= 9
     ]
+    closed_items = [item for item in submission_items if str(item.get("status", "")).lower() == "closed"]
     speedrun_items = [item for item in submission_items if _is_speedrun_submission(item)]
 
     if not rows and not submission_items:
@@ -249,6 +250,13 @@ def build_ops_digest(db_path: Path, report_path: Path, *, mode: str = "morning")
         else:
             out.append("- none")
 
+        out.extend(["", "closed / skip:"])
+        if closed_items:
+            for idx, item in enumerate(closed_items[:5], start=1):
+                out.append(_format_submission_item(idx, item))
+        else:
+            out.append("- none")
+
         out.extend(["", "watchlist later:"])
         for idx, row in enumerate(by_bucket.get("this_week", [])[:5], start=1):
             out.append(_format_task_line(idx, row))
@@ -260,6 +268,7 @@ def build_ops_digest(db_path: Path, report_path: Path, *, mode: str = "morning")
         ("today", by_bucket.get("today", []) + by_bucket.get("overdue", []), 5),
         ("this week", by_bucket.get("this_week", []), 6),
         ("apply now", apply_now_items, 6),
+        ("closed / skip", closed_items, 4),
         ("new speedrun / cohort", speedrun_items if speedrun_items else speedrun_rows, 5),
         ("no deadline / outreach", by_bucket.get("no_deadline", []), 6),
     ]

@@ -851,21 +851,45 @@ def handle_command(
         return
 
     if cmd == "/submission_scan":
+        raw_arg = (arg or "").strip()
+        full_sweep = raw_arg.lower() in {"full", "daily", "seed"}
         run_cmd = fundlist + [
             "submission-scan",
-            "--max-sites",
-            os.environ.get("VC_SUBMISSION_MAX_SITES", "80"),
             "--max-pages-per-site",
             os.environ.get("VC_SUBMISSION_MAX_PAGES", "6"),
-            "--max-results-per-query",
-            os.environ.get("VC_SUBMISSION_MAX_RESULTS_PER_QUERY", "10"),
-            "--report-limit",
-            os.environ.get("VC_SUBMISSION_REPORT_LIMIT", "80"),
             "--output",
             str(DEFAULT_SUBMISSION_REPORT),
         ]
-        if arg:
-            run_cmd.extend(["--query", arg.strip()])
+        if full_sweep:
+            run_cmd.extend(
+                [
+                    "--skip-search",
+                    "--max-sites",
+                    os.environ.get("VC_SUBMISSION_MAX_SITES", "500"),
+                    "--max-results-per-query",
+                    os.environ.get("VC_SUBMISSION_MAX_RESULTS_PER_QUERY", "0"),
+                    "--fundraise-seed-limit",
+                    os.environ.get("VC_SUBMISSION_FUNDRAISE_SEED_LIMIT", "5000"),
+                    "--report-limit",
+                    os.environ.get("VC_SUBMISSION_REPORT_LIMIT", "500"),
+                ]
+            )
+            seed_urls = os.environ.get("VC_SUBMISSION_SEED_URLS", "").strip()
+            if seed_urls:
+                run_cmd.extend(["--seed-urls", seed_urls])
+        else:
+            run_cmd.extend(
+                [
+                    "--max-sites",
+                    os.environ.get("VC_SUBMISSION_MAX_SITES", "80"),
+                    "--max-results-per-query",
+                    os.environ.get("VC_SUBMISSION_MAX_RESULTS_PER_QUERY", "10"),
+                    "--report-limit",
+                    os.environ.get("VC_SUBMISSION_REPORT_LIMIT", "80"),
+                ]
+            )
+            if raw_arg:
+                run_cmd.extend(["--query", raw_arg])
         code, out = run_local_command(run_cmd, timeout_sec=1200)
         msg = [format_command_result("submission-scan", code, out, max_lines=50), "", read_report(DEFAULT_SUBMISSION_REPORT)]
         client.send_message(chat_id, "\n".join(msg))
