@@ -175,6 +175,53 @@ def read_report(path: Path) -> str:
     return "\n".join(lines)
 
 
+def load_submission_items() -> List[Dict[str, Any]]:
+    if not DEFAULT_SUBMISSION_JSON.exists():
+        return []
+    try:
+        payload = json.loads(DEFAULT_SUBMISSION_JSON.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return []
+    items = payload.get("items", [])
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _submission_sort_key(item: Dict[str, Any]) -> Tuple[int, str, int, str]:
+    status = str(item.get("status", "")).strip().lower()
+    deadline = str(item.get("deadline_date") or "").strip()
+    score = int(item.get("score", 0) or 0)
+    if status == "deadline":
+        return (0, deadline or "9999-12-31", -score, str(item.get("org_name", "")).lower())
+    if status in {"open", "rolling"}:
+        return (1, deadline or "9999-12-31", -score, str(item.get("org_name", "")).lower())
+    if status == "closed":
+        return (3, deadline or "9999-12-31", -score, str(item.get("org_name", "")).lower())
+    return (2, deadline or "9999-12-31", -score, str(item.get("org_name", "")).lower())
+
+
+def format_submission_subset(title: str, statuses: Sequence[str], *, limit: int = 12) -> str:
+    wanted = {s.strip().lower() for s in statuses if s.strip()}
+    items = [item for item in load_submission_items() if str(item.get("status", "")).strip().lower() in wanted]
+    if not items:
+        return f"[{title}]\n- none"
+
+    ordered = sorted(items, key=_submission_sort_key)[:limit]
+    lines = [f"[{title}]", f"- generated: {now_utc_iso()}", f"- count: {len(items)}", ""]
+    for idx, item in enumerate(ordered, start=1):
+        deadline = str(item.get("deadline_date") or item.get("deadline_text") or "-").strip() or "-"
+        org = str(item.get("org_name", "-")).strip()
+        status = str(item.get("status", "-")).strip()
+        score = int(item.get("score", 0) or 0)
+        official_page = str(item.get("source_url", "-")).strip() or "-"
+        submit_url = str(item.get("submission_url", "-")).strip() or "-"
+        lines.append(f"{idx}. {org} | {status} | deadline={deadline} | score={score}")
+        lines.append(f"   official: {official_page}")
+        lines.append(f"   apply: {submit_url}")
+    return "\n".join(lines)
+
+
 def parse_bool_env(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).strip().lower() not in {"0", "false", "no", "off", ""}
 
@@ -610,6 +657,9 @@ def handle_command(
                     "/ops_push",
                     "/submission_scan [query]",
                     "/submission_list [limit]",
+                    "/apply_open [limit]",
+                    "/apply_deadline [limit]",
+                    "/apply_closed [limit]",
                     "/submission_report",
                     "/submission_export",
                     "/context_save <summary>",
@@ -908,6 +958,19 @@ def handle_command(
         ]
         code, out = run_local_command(run_cmd, timeout_sec=120)
         client.send_message(chat_id, format_command_result("submission-list", code, out, max_lines=60))
+        return
+
+    if cmd in {"/apply_open", "/apply_deadline", "/apply_closed"}:
+        limit = 12
+        if arg and arg.strip().isdigit():
+            limit = max(1, min(50, int(arg.strip())))
+        if cmd == "/apply_open":
+            client.send_message(chat_id, format_submission_subset("APPLY OPEN", ["open", "rolling"], limit=limit))
+            return
+        if cmd == "/apply_deadline":
+            client.send_message(chat_id, format_submission_subset("APPLY DEADLINE", ["deadline"], limit=limit))
+            return
+        client.send_message(chat_id, format_submission_subset("APPLY CLOSED", ["closed"], limit=limit))
         return
 
     if cmd == "/submission_report":
