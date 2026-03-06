@@ -181,7 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
     fundraise_import.add_argument(
         "--files",
         default=DEFAULT_FUNDRAISE_FILES_ARG,
-        help="Comma-separated absolute file paths (.csv,.tsv,.xlsx)",
+        help="Comma-separated absolute file paths (.csv,.tsv,.xlsx,.pdf)",
     )
     fundraise_import.set_defaults(func=fundraise_import_command)
 
@@ -201,7 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
     fundraise_run.add_argument(
         "--files",
         default=DEFAULT_FUNDRAISE_FILES_ARG,
-        help="Comma-separated absolute file paths (.csv,.tsv,.xlsx)",
+        help="Comma-separated absolute file paths (.csv,.tsv,.xlsx,.pdf)",
     )
     fundraise_run.add_argument("--output", default=DEFAULT_FUNDRAISE_REPORT_PATH)
     fundraise_run.add_argument("--with-ai", action="store_true", help="Use AI provider for summary section")
@@ -250,7 +250,7 @@ def build_parser() -> argparse.ArgumentParser:
     ops_sync.add_argument(
         "--files",
         default=DEFAULT_FUNDRAISE_FILES_ARG,
-        help="Comma-separated absolute file paths (.csv,.tsv,.xlsx)",
+        help="Comma-separated absolute file paths (.csv,.tsv,.xlsx,.pdf)",
     )
     ops_sync.add_argument("--skip-import", action="store_true", help="Skip file import and use DB only")
     ops_sync.add_argument("--alert-days", type=int, default=14)
@@ -265,7 +265,7 @@ def build_parser() -> argparse.ArgumentParser:
     ops_report.add_argument(
         "--files",
         default=DEFAULT_FUNDRAISE_FILES_ARG,
-        help="Comma-separated absolute file paths (.csv,.tsv,.xlsx)",
+        help="Comma-separated absolute file paths (.csv,.tsv,.xlsx,.pdf)",
     )
     ops_report.add_argument("--skip-import", action="store_true", help="Skip file import and use DB only")
     ops_report.add_argument("--alert-days", type=int, default=14)
@@ -279,7 +279,7 @@ def build_parser() -> argparse.ArgumentParser:
     ops_program_report.add_argument(
         "--files",
         default=DEFAULT_FUNDRAISE_FILES_ARG,
-        help="Comma-separated absolute file paths (.csv,.tsv,.xlsx)",
+        help="Comma-separated absolute file paths (.csv,.tsv,.xlsx,.pdf)",
     )
     ops_program_report.add_argument("--skip-import", action="store_true", help="Skip file import and use DB only")
     ops_program_report.add_argument("--program", required=True, help="Program keyword, e.g. 'alliance dao'")
@@ -302,7 +302,7 @@ def build_parser() -> argparse.ArgumentParser:
     ops_watch.add_argument(
         "--files",
         default=DEFAULT_FUNDRAISE_FILES_ARG,
-        help="Comma-separated absolute file paths (.csv,.tsv,.xlsx)",
+        help="Comma-separated absolute file paths (.csv,.tsv,.xlsx,.pdf)",
     )
     ops_watch.add_argument("--skip-import", action="store_true", help="Skip file import and use DB only")
     ops_watch.add_argument("--alert-days", type=int, default=14)

@@ -9,6 +9,7 @@ import re
 import sqlite3
 import urllib.error
 import urllib.request
+import zlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +31,16 @@ DEFAULT_FUNDRAISE_FILES = [
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 URL_RE = re.compile(r"https?://[^\s,)\]]+")
+DATE_TEXT_RE = re.compile(r"\b20\d{2}[./-]\d{1,2}[./-]\d{1,2}\b")
+PDF_OBJECT_RE = re.compile(rb"(\d+)\s+(\d+)\s+obj(.*?)endobj", re.S)
+PDF_FONT_REF_RE = re.compile(rb"/(Font\d+)\s+(\d+)\s+0\s+R")
+PDF_TOUNICODE_RE = re.compile(rb"/ToUnicode\s+(\d+)\s+0\s+R")
+PDF_STREAM_RE = re.compile(rb"stream\r?\n(.*?)endstream", re.S)
+PDF_TOKEN_RE = re.compile(
+    r"/(?:[^\s/\[\]()<>]+)|\[(?:.|\n|\r)*?\]|\((?:\\.|[^\\)])*\)|<[^>]*>|-?\d+(?:\.\d+)?|[A-Za-z\*']+|\""
+)
+PDF_TEXT_ITEM_RE = re.compile(r"\((?:\\.|[^\\)])*\)|<[^>]*>")
+PDF_NUMERIC_RE = re.compile(r"^[\s$€£₩¥+-]*[\d,]+(?:\.\d+)?%?$")
 
 
 @dataclass
@@ -78,7 +89,9 @@ def normalize_text(value: str) -> str:
 
 
 def sanitize(value: str, limit: int = 1000) -> str:
-    return value.strip().replace("\x00", "")[:limit]
+    cleaned = value.strip().replace("\x00", "")
+    cleaned = re.sub(r"[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]+", " ", cleaned)
+    return cleaned[:limit]
 
 
 def category_from_path(path: Path) -> str:
@@ -97,6 +110,10 @@ def category_from_path(path: Path) -> str:
         return "pitchdeck_email"
     if name.endswith(".xlsx"):
         return "xlsx_sheet"
+    if name.endswith(".pdf"):
+        if any(token in name for token in ["investment", "portfolio", "vesting", "track_record"]):
+            return "pdf_investment_list"
+        return "pdf_document"
     return "unknown"
 
 
@@ -432,6 +449,364 @@ def parse_xlsx(path: Path) -> List[FundraisingRecord]:
     return out
 
 
+def _extract_pdf_object_stream(body: bytes) -> bytes:
+    match = PDF_STREAM_RE.search(body)
+    if not match:
+        return b""
+    data = match.group(1).rstrip(b"\r\n")
+    if b"/FlateDecode" in body:
+        try:
+            data = zlib.decompress(data)
+        except Exception:  # noqa: BLE001
+            return b""
+    return data
+
+
+def _decode_pdf_hex_text(hex_text: str) -> str:
+    try:
+        return bytes.fromhex(hex_text).decode("utf-16-be", errors="ignore")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _parse_pdf_cmap(text: str) -> Dict[int, str]:
+    cmap: Dict[int, str] = {}
+    lines = [line.strip() for line in text.splitlines()]
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        match = re.match(r"(\d+)\s+beginbfchar", line)
+        if match:
+            count = int(match.group(1))
+            for row in lines[idx + 1 : idx + 1 + count]:
+                item = re.match(r"<([0-9A-Fa-f]+)>\s+<([0-9A-Fa-f]+)>", row)
+                if not item:
+                    continue
+                cmap[int(item.group(1), 16)] = _decode_pdf_hex_text(item.group(2))
+            idx += count + 1
+            continue
+
+        match = re.match(r"(\d+)\s+beginbfrange", line)
+        if match:
+            count = int(match.group(1))
+            for row in lines[idx + 1 : idx + 1 + count]:
+                item = re.match(r"<([0-9A-Fa-f]+)>\s+<([0-9A-Fa-f]+)>\s+<([0-9A-Fa-f]+)>", row)
+                if item:
+                    start = int(item.group(1), 16)
+                    end = int(item.group(2), 16)
+                    dest = int(item.group(3), 16)
+                    width = len(item.group(3))
+                    for offset, code in enumerate(range(start, end + 1)):
+                        cmap[code] = _decode_pdf_hex_text(f"{dest + offset:0{width}X}")
+                    continue
+
+                item = re.match(r"<([0-9A-Fa-f]+)>\s+<([0-9A-Fa-f]+)>\s+\[(.*)\]", row)
+                if not item:
+                    continue
+                start = int(item.group(1), 16)
+                targets = re.findall(r"<([0-9A-Fa-f]+)>", item.group(3))
+                for offset, target in enumerate(targets):
+                    cmap[start + offset] = _decode_pdf_hex_text(target)
+            idx += count + 1
+            continue
+        idx += 1
+    return cmap
+
+
+def _parse_pdf_font_maps(raw: bytes) -> Dict[str, Dict[int, str]]:
+    objects = {int(match.group(1)): match.group(3) for match in PDF_OBJECT_RE.finditer(raw)}
+    font_obj_by_name: Dict[str, int] = {}
+    for body in objects.values():
+        if b"/Font" not in body:
+            continue
+        for font_name, obj_ref in PDF_FONT_REF_RE.findall(body):
+            font_obj_by_name[font_name.decode("latin1")] = int(obj_ref)
+
+    out: Dict[str, Dict[int, str]] = {}
+    for font_name, obj_ref in font_obj_by_name.items():
+        body = objects.get(obj_ref, b"")
+        match = PDF_TOUNICODE_RE.search(body)
+        if not match:
+            continue
+        cmap_body = objects.get(int(match.group(1)), b"")
+        stream = _extract_pdf_object_stream(cmap_body)
+        if not stream:
+            continue
+        out[font_name] = _parse_pdf_cmap(stream.decode("latin1", errors="ignore"))
+    return out
+
+
+def _pdf_unescape_literal_bytes(value: bytes) -> bytes:
+    out = bytearray()
+    idx = 0
+    while idx < len(value):
+        byte = value[idx]
+        if byte != 92:
+            out.append(byte)
+            idx += 1
+            continue
+
+        idx += 1
+        if idx >= len(value):
+            break
+
+        escaped = value[idx]
+        escapes = {
+            ord("n"): 10,
+            ord("r"): 13,
+            ord("t"): 9,
+            ord("b"): 8,
+            ord("f"): 12,
+            ord("("): 40,
+            ord(")"): 41,
+            ord("\\"): 92,
+        }
+        if escaped in escapes:
+            out.append(escapes[escaped])
+            idx += 1
+            continue
+
+        if 48 <= escaped <= 55:
+            octal = bytes([escaped])
+            idx += 1
+            for _ in range(2):
+                if idx < len(value) and 48 <= value[idx] <= 55:
+                    octal += bytes([value[idx]])
+                    idx += 1
+                else:
+                    break
+            out.append(int(octal, 8))
+            continue
+
+        if escaped in (10, 13):
+            if escaped == 13 and idx + 1 < len(value) and value[idx + 1] == 10:
+                idx += 2
+            else:
+                idx += 1
+            continue
+
+        out.append(escaped)
+        idx += 1
+    return bytes(out)
+
+
+def _decode_pdf_text_bytes(value: bytes, cmap: Dict[int, str]) -> str:
+    if cmap and len(value) % 2 == 0:
+        out: List[str] = []
+        for idx in range(0, len(value), 2):
+            code = int.from_bytes(value[idx : idx + 2], "big")
+            out.append(cmap.get(code, ""))
+        joined = "".join(out).replace("\x00", "")
+        if joined.strip():
+            return joined
+
+    if len(value) % 2 == 0:
+        try:
+            decoded = value.decode("utf-16-be", errors="ignore").replace("\x00", "")
+            if decoded.strip():
+                return decoded
+        except Exception:  # noqa: BLE001
+            pass
+    return value.decode("latin1", errors="ignore").replace("\x00", "")
+
+
+def _extract_pdf_text_chunks(path: Path) -> List[Tuple[float, float, str]]:
+    raw = path.read_bytes()
+    font_maps = _parse_pdf_font_maps(raw)
+    chunks: List[Tuple[float, float, str]] = []
+
+    for match in PDF_OBJECT_RE.finditer(raw):
+        stream = _extract_pdf_object_stream(match.group(3))
+        if not stream:
+            continue
+        content = stream.decode("latin1", errors="ignore")
+        if "Tf" not in content or ("Tj" not in content and "TJ" not in content):
+            continue
+
+        current_font = ""
+        current_x = 0.0
+        current_y = 0.0
+        stack: List[str] = []
+        for token in PDF_TOKEN_RE.findall(content):
+            if token in {"Tf", "Tm", "Td", "Tj", "TJ", "T*", "'"}:
+                if token == "Tf" and len(stack) >= 2 and stack[-2].startswith("/"):
+                    current_font = stack[-2][1:]
+                elif token == "Tm" and len(stack) >= 6:
+                    try:
+                        current_x = float(stack[-2])
+                        current_y = float(stack[-1])
+                    except Exception:  # noqa: BLE001
+                        pass
+                elif token == "Td" and len(stack) >= 2:
+                    try:
+                        current_x += float(stack[-2])
+                        current_y += float(stack[-1])
+                    except Exception:  # noqa: BLE001
+                        pass
+                elif token == "Tj" and stack:
+                    operand = stack[-1]
+                    raw_text = b""
+                    if operand.startswith("("):
+                        raw_text = _pdf_unescape_literal_bytes(operand[1:-1].encode("latin1", errors="replace"))
+                    elif operand.startswith("<"):
+                        try:
+                            raw_text = bytes.fromhex(operand[1:-1])
+                        except Exception:  # noqa: BLE001
+                            raw_text = b""
+                    text = _decode_pdf_text_bytes(raw_text, font_maps.get(current_font, {}))
+                    text = sanitize(" ".join(text.split()), limit=2000)
+                    if text:
+                        chunks.append((round(current_y, 1), round(current_x, 1), text))
+                elif token == "TJ" and stack:
+                    parts: List[str] = []
+                    for item in PDF_TEXT_ITEM_RE.findall(stack[-1]):
+                        raw_text = b""
+                        if item.startswith("("):
+                            raw_text = _pdf_unescape_literal_bytes(item[1:-1].encode("latin1", errors="replace"))
+                        elif item.startswith("<"):
+                            try:
+                                raw_text = bytes.fromhex(item[1:-1])
+                            except Exception:  # noqa: BLE001
+                                raw_text = b""
+                        parts.append(_decode_pdf_text_bytes(raw_text, font_maps.get(current_font, {})))
+                    text = sanitize(" ".join("".join(parts).split()), limit=2000)
+                    if text:
+                        chunks.append((round(current_y, 1), round(current_x, 1), text))
+                stack = []
+                continue
+            stack.append(token)
+    return chunks
+
+
+def _group_pdf_rows(chunks: Sequence[Tuple[float, float, str]]) -> List[List[Tuple[float, str]]]:
+    grouped: List[Tuple[float, List[Tuple[float, str]]]] = []
+    for y_pos, x_pos, text in sorted(chunks, key=lambda item: (item[0], item[1], item[2])):
+        if grouped and abs(grouped[-1][0] - y_pos) <= 1.0:
+            grouped[-1][1].append((x_pos, text))
+        else:
+            grouped.append((y_pos, [(x_pos, text)]))
+    return [sorted(row, key=lambda item: item[0]) for _, row in grouped]
+
+
+def _looks_like_pdf_header(row: Sequence[Tuple[float, str]]) -> bool:
+    joined = normalize_text(" ".join(text for _, text in row))
+    first = normalize_text(row[0][1]) if row else ""
+    strong_hints = [
+        "프로젝트",
+        "투자금",
+        "단가",
+        "코인",
+        "물량",
+        "일자",
+        "비고",
+        "나머지",
+    ]
+    if first in {normalize_text("프로젝트"), normalize_text("프로젝트명")}:
+        return True
+    score = sum(1 for hint in strong_hints if normalize_text(hint) in joined)
+    return score >= 2
+
+
+def _looks_like_pdf_main_row(row: Sequence[Tuple[float, str]]) -> bool:
+    if not row:
+        return False
+    if row[0][0] > 120:
+        return False
+    return any(any(ch.isalpha() for ch in text) for _, text in row[:2])
+
+
+def _extract_pdf_date_text(values: Sequence[str]) -> str:
+    for value in values:
+        match = DATE_TEXT_RE.search(value)
+        if match:
+            return match.group(0)
+        if value.strip().upper() == "N/A":
+            return value.strip()
+    return ""
+
+
+def _pick_pdf_funding(values: Sequence[str]) -> str:
+    numeric_cells: List[Tuple[float, str]] = []
+    for value in values:
+        text = value.strip()
+        if not text or not PDF_NUMERIC_RE.match(text) or DATE_TEXT_RE.search(text):
+            continue
+        try:
+            amount = float(text.replace(",", "").replace("%", "").replace("$", ""))
+        except Exception:  # noqa: BLE001
+            continue
+        numeric_cells.append((amount, text))
+
+    for amount, text in numeric_cells:
+        if amount >= 1000:
+            return text
+    return numeric_cells[0][1] if numeric_cells else ""
+
+
+def parse_pdf(path: Path) -> List[FundraisingRecord]:
+    category = category_from_path(path)
+    rows = _group_pdf_rows(_extract_pdf_text_chunks(path))
+    out: List[FundraisingRecord] = []
+    pending_notes: List[str] = []
+    header_mode = False
+
+    for row in rows:
+        values = [text.strip() for _, text in row if text.strip()]
+        if not values:
+            continue
+
+        if _looks_like_pdf_header(row):
+            pending_notes = []
+            header_mode = True
+            continue
+
+        if not _looks_like_pdf_main_row(row):
+            if header_mode:
+                continue
+            pending_notes.append(" ".join(values))
+            continue
+
+        header_mode = False
+        org_name = values[0]
+        if not org_name or org_name.isdigit():
+            pending_notes = []
+            continue
+
+        row_join = " | ".join(values)
+        emails = extract_emails(row_join)
+        urls = extract_urls(row_join)
+        notes_parts = pending_notes + values[1:]
+        out.append(
+            FundraisingRecord(
+                source_file=str(path),
+                source_row=len(out) + 1,
+                category=category,
+                org_name=sanitize(org_name, limit=240),
+                contact_name="",
+                email=sanitize(",".join(emails[:3]), limit=240),
+                website=sanitize(urls[0] if urls else "", limit=500),
+                status="",
+                region="",
+                funding=sanitize(_pick_pdf_funding(values[1:]), limit=200),
+                date_text=sanitize(_extract_pdf_date_text(values[1:]), limit=120),
+                notes=sanitize(" | ".join([part for part in notes_parts if part]), limit=800),
+                raw_json=json.dumps(
+                    {
+                        "pdf_row": [{"x": x_pos, "text": text} for x_pos, text in row],
+                        "pending_prefix_notes": pending_notes,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+        pending_notes = []
+
+    if pending_notes and out:
+        last = out[-1]
+        last.notes = sanitize(f"{last.notes} | {' '.join(pending_notes)}", limit=800)
+    return out
+
+
 def import_fundraising_files(db_path: str, files: Sequence[str]) -> Tuple[int, int]:
     store = FundraisingStore(db_path)
     all_records: List[FundraisingRecord] = []
@@ -446,6 +821,8 @@ def import_fundraising_files(db_path: str, files: Sequence[str]) -> Tuple[int, i
                 parsed = parse_csv_like(p)
             elif p.suffix.lower() == ".xlsx":
                 parsed = parse_xlsx(p)
+            elif p.suffix.lower() == ".pdf":
+                parsed = parse_pdf(p)
             else:
                 print(f"[warn] unsupported extension skipped: {p}")
                 continue
