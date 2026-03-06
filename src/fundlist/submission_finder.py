@@ -1,0 +1,1866 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import sqlite3
+import urllib.parse
+import urllib.request
+from collections import deque
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from html import unescape
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+from .store import ensure_parent_dir
+
+
+DEFAULT_DISCOVERY_QUERIES = [
+    '"pitch us" "venture capital"',
+    '"submit your pitch" "venture capital"',
+    '"deal submission" "venture capital"',
+    '"founder form" "venture capital"',
+    '"apply" "seed fund"',
+    '"apply" "early stage fund"',
+    '"startup application" accelerator',
+    '"founder application" accelerator',
+    '"batch" accelerator apply',
+    '"cohort" accelerator apply',
+    '"web3 accelerator" apply',
+    '"crypto accelerator" apply',
+    '"ai accelerator" apply',
+    '"pitch deck" "submit" fund',
+    '"we review every pitch" vc',
+    '"only way to pitch us"',
+    '"no warm intro" vc',
+    '"open applications" accelerator',
+    '"rolling applications" accelerator',
+    '"startup program" apply',
+    '"venture studio" apply',
+    '"angel syndicate" apply',
+    '"submit company" vc',
+    '"contact" "pitch us" fund',
+    '"investor application" startup',
+    '"speedrun" apply',
+    '"alliance dao" apply',
+    '"yc" apply startup',
+    '"seedcamp" apply',
+    '"techstars" apply',
+    '"web3 grants" apply',
+    '"ecosystem grants" "apply"',
+    '"foundation grant" "application form"',
+    '"developer grant" "applications open"',
+    '"startup grant" "rolling applications"',
+]
+
+SUBMISSION_PHRASES = [
+    "pitch us",
+    "submit your pitch",
+    "submit your company",
+    "deal submission",
+    "founder application",
+    "application form",
+    "startup application",
+    "we review every pitch",
+    "only way to pitch",
+    "apply now",
+    "apply here",
+    "start your application",
+    "grant application",
+    "apply for grant",
+    "submit grant proposal",
+]
+
+STRONG_SUBMISSION_PHRASES = {
+    "pitch us",
+    "submit your pitch",
+    "submit your company",
+    "deal submission",
+    "founder application",
+    "application form",
+    "startup application",
+    "we review every pitch",
+    "only way to pitch",
+    "grant application",
+    "apply for grant",
+    "submit grant proposal",
+}
+
+FORM_EMBED_MARKERS = [
+    "typeform.com",
+    "airtable.com",
+    "forms.gle",
+    "docs.google.com/forms",
+    "hubspot.com",
+    "jotform.com",
+    "submittable.com",
+    "fillout.com",
+    "tally.so",
+    "notionforms",
+]
+
+STRONG_PATH_HINTS = ["apply", "pitch", "submit", "application", "grant", "grants"]
+DISCOVERY_PATH_HINTS = STRONG_PATH_HINTS + ["founder", "accelerator", "program", "contact"]
+
+FORM_HOST_MARKERS = [
+    "typeform.com",
+    "airtable.com",
+    "forms.gle",
+    "docs.google.com",
+    "hubspot.com",
+    "jotform.com",
+    "submittable.com",
+    "fillout.com",
+    "tally.so",
+    "wkf.ms",
+]
+
+CLOSED_MARKERS = [
+    "applications closed",
+    "application closed",
+    "not accepting",
+    "closed for applications",
+    "currently closed",
+    "no longer accepting",
+]
+ROLLING_MARKERS = [
+    "rolling basis",
+    "rolling applications",
+    "year-round",
+    "always open",
+    "open applications",
+]
+INTRO_ONLY_MARKERS = [
+    "warm intro",
+    "by referral",
+    "through referral",
+    "do not accept unsolicited",
+    "we do not accept cold",
+    "intro only",
+]
+
+REQUIREMENT_MARKERS = [
+    ("pitch deck", "deck required"),
+    ("deck", "deck requested"),
+    ("one-pager", "one-pager requested"),
+    ("traction", "traction metrics requested"),
+    ("tokenomics", "tokenomics requested"),
+    ("demo", "demo requested"),
+    ("whitepaper", "whitepaper requested"),
+]
+
+NON_TARGET_DOMAINS = {
+    "linkedin.com",
+    "facebook.com",
+    "instagram.com",
+    "x.com",
+    "twitter.com",
+    "youtube.com",
+    "wikipedia.org",
+    "reddit.com",
+    "glassdoor.com",
+    "indeed.com",
+    "wellfound.com",
+    "angel.co",
+    "techcrunch.com",
+    "fortune.com",
+    "venturebeat.com",
+    "coindesk.com",
+    "cointelegraph.com",
+    "axios.com",
+    "prnewswire.com",
+    "businesswire.com",
+    "crunchbase.com",
+    "finsmes.com",
+    "en.wikipedia.org",
+    "wikipedia.org",
+    "youtube.com",
+    "youtu.be",
+    "substack.com",
+    "mirror.xyz",
+    "theblock.co",
+    "decrypt.co",
+    "sifted.eu",
+    "ft.com",
+    "economist.com",
+    "muckrack.com",
+    "news.ycombinator.com",
+    "hackernews.com",
+    "rss.com",
+    "podcastindex.org",
+    "sec.gov",
+    "vcpost.com",
+    "gigaom.com",
+    "wsj.com",
+    "nytimes.com",
+    "bloomberg.com",
+    "forbes.com",
+    "prweb.com",
+    "pehub.com",
+    "medium.com",
+    "businessinsider.com",
+}
+
+CONTENT_PATH_MARKERS = (
+    "/blog/",
+    "/news/",
+    "/insight",
+    "/insights/",
+    "/article",
+    "/articles/",
+    "/press",
+    "/media",
+    "/podcast",
+    "/events/",
+    "/portfolio/",
+    "/careers",
+    "/jobs",
+)
+
+RELEVANCE_MARKERS = [
+    "venture capital",
+    "startup",
+    "founder",
+    "accelerator",
+    "cohort",
+    "portfolio",
+    "invest",
+    "grant",
+    "program",
+    "web3",
+    "crypto",
+    "seed fund",
+    "early stage",
+    "angel",
+    "syndicate",
+]
+
+GENERIC_TITLE_MARKERS = [
+    "contact us",
+    "contact",
+    "apply",
+    "application",
+    "submit",
+    "pitch",
+    "refer",
+    "home",
+    "welcome",
+]
+
+BAD_LINK_MARKERS = [
+    "privacy",
+    "terms",
+    "career",
+    "jobs",
+    "linkedin",
+    "twitter",
+    "facebook",
+    "instagram",
+    "youtube",
+]
+
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+@dataclass
+class DiscoverySeed:
+    url: str
+    org_name_hint: str
+    source: str
+
+
+@dataclass
+class SubmissionTarget:
+    org_name: str
+    org_type: str
+    domain: str
+    source_url: str
+    submission_url: str
+    submission_type: str
+    status: str
+    requirements: str
+    notes: str
+    evidence: str
+    source_page_snapshot: str
+    score: int
+
+    @property
+    def fingerprint(self) -> str:
+        norm_url = re.sub(r"^https?://", "", self.submission_url.strip().lower())
+        raw = f"{self.domain}|{norm_url}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+class SubmissionStore:
+    def __init__(self, db_path: str) -> None:
+        ensure_parent_dir(db_path)
+        self.conn = sqlite3.connect(db_path)
+        self._init_schema()
+
+    def _init_schema(self) -> None:
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS submission_targets (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              fingerprint TEXT NOT NULL UNIQUE,
+              org_name TEXT NOT NULL,
+              org_type TEXT NOT NULL,
+              domain TEXT NOT NULL,
+              source_url TEXT NOT NULL,
+              submission_url TEXT NOT NULL,
+              submission_type TEXT NOT NULL,
+              status TEXT NOT NULL,
+              requirements TEXT NOT NULL,
+              notes TEXT NOT NULL,
+              evidence TEXT NOT NULL,
+              source_page_snapshot TEXT NOT NULL DEFAULT '',
+              score INTEGER NOT NULL,
+              discovered_at TEXT NOT NULL,
+              last_checked_at TEXT NOT NULL
+            )
+            """
+        )
+        self._ensure_column("submission_targets", "source_page_snapshot", "TEXT NOT NULL DEFAULT ''")
+
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS submission_target_events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              fingerprint TEXT NOT NULL,
+              domain TEXT NOT NULL,
+              submission_url TEXT NOT NULL,
+              event_type TEXT NOT NULL,
+              before_json TEXT NOT NULL,
+              after_json TEXT NOT NULL,
+              detected_at TEXT NOT NULL
+            )
+            """
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_submission_score ON submission_targets(score DESC, last_checked_at DESC)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_submission_domain ON submission_targets(domain, last_checked_at DESC)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_submission_events_time ON submission_target_events(detected_at DESC)"
+        )
+        self.conn.commit()
+
+    def _ensure_column(self, table: str, column: str, ddl: str) -> None:
+        cur = self.conn.execute(f"PRAGMA table_info({table})")
+        cols = {str(r[1]) for r in cur.fetchall()}
+        if column not in cols:
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+    def _state_from_row(self, row: sqlite3.Row) -> Dict[str, object]:
+        return {
+            "org_name": row["org_name"],
+            "org_type": row["org_type"],
+            "submission_url": row["submission_url"],
+            "submission_type": row["submission_type"],
+            "status": row["status"],
+            "requirements": row["requirements"],
+            "notes": row["notes"],
+            "evidence": row["evidence"],
+            "source_page_snapshot": row["source_page_snapshot"],
+            "score": row["score"],
+        }
+
+    def _state_from_target(self, target: SubmissionTarget) -> Dict[str, object]:
+        return {
+            "org_name": target.org_name,
+            "org_type": target.org_type,
+            "submission_url": target.submission_url,
+            "submission_type": target.submission_type,
+            "status": target.status,
+            "requirements": target.requirements,
+            "notes": target.notes,
+            "evidence": target.evidence,
+            "source_page_snapshot": target.source_page_snapshot,
+            "score": target.score,
+        }
+
+    def _insert_event(
+        self,
+        *,
+        fingerprint: str,
+        domain: str,
+        submission_url: str,
+        event_type: str,
+        before_state: Dict[str, object],
+        after_state: Dict[str, object],
+        detected_at: str,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO submission_target_events (
+              fingerprint, domain, submission_url, event_type, before_json, after_json, detected_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                fingerprint,
+                domain,
+                submission_url,
+                event_type,
+                json.dumps(before_state, ensure_ascii=False),
+                json.dumps(after_state, ensure_ascii=False),
+                detected_at,
+            ),
+        )
+
+    def upsert_targets(self, targets: Sequence[SubmissionTarget]) -> int:
+        now = now_utc_iso()
+        self.conn.row_factory = sqlite3.Row
+        upsert_sql = """
+            INSERT INTO submission_targets (
+              fingerprint, org_name, org_type, domain, source_url, submission_url,
+              submission_type, status, requirements, notes, evidence, source_page_snapshot,
+              score, discovered_at, last_checked_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(fingerprint) DO UPDATE SET
+              org_name=excluded.org_name,
+              org_type=excluded.org_type,
+              source_url=excluded.source_url,
+              submission_type=excluded.submission_type,
+              status=excluded.status,
+              requirements=excluded.requirements,
+              notes=excluded.notes,
+              evidence=excluded.evidence,
+              source_page_snapshot=excluded.source_page_snapshot,
+              score=excluded.score,
+              last_checked_at=excluded.last_checked_at
+        """
+        before = self.conn.total_changes
+        with self.conn:
+            for target in targets:
+                cur = self.conn.execute(
+                    "SELECT org_name, org_type, submission_url, submission_type, status, requirements, notes, evidence, source_page_snapshot, score FROM submission_targets WHERE fingerprint = ?",
+                    (target.fingerprint,),
+                )
+                old_row = cur.fetchone()
+                old_state = self._state_from_row(old_row) if old_row else {}
+                new_state = self._state_from_target(target)
+                event_type = "created" if old_row is None else "updated"
+
+                if old_row is None or old_state != new_state:
+                    self._insert_event(
+                        fingerprint=target.fingerprint,
+                        domain=target.domain,
+                        submission_url=target.submission_url,
+                        event_type=event_type,
+                        before_state=old_state,
+                        after_state=new_state,
+                        detected_at=now,
+                    )
+
+                self.conn.execute(
+                    upsert_sql,
+                    (
+                        target.fingerprint,
+                        target.org_name,
+                        target.org_type,
+                        target.domain,
+                        target.source_url,
+                        target.submission_url,
+                        target.submission_type,
+                        target.status,
+                        target.requirements,
+                        target.notes,
+                        target.evidence,
+                        target.source_page_snapshot,
+                        target.score,
+                        now,
+                        now,
+                    ),
+                )
+        return self.conn.total_changes - before
+
+    def list_targets(
+        self,
+        *,
+        limit: int = 80,
+        status: str = "",
+        org_type: str = "",
+        min_score: int = 0,
+    ) -> List[sqlite3.Row]:
+        self.conn.row_factory = sqlite3.Row
+        where: List[str] = ["score >= ?"]
+        args: List[object] = [min_score]
+        if status:
+            where.append("status = ?")
+            args.append(status)
+        if org_type:
+            where.append("org_type = ?")
+            args.append(org_type)
+        sql = f"""
+            SELECT id, org_name, org_type, domain, source_url, submission_url, submission_type,
+                   status, requirements, notes, evidence, source_page_snapshot, score,
+                   discovered_at, last_checked_at
+            FROM submission_targets
+            WHERE {' AND '.join(where)}
+            ORDER BY score DESC, last_checked_at DESC, id DESC
+            LIMIT ?
+        """
+        args.append(limit)
+        cur = self.conn.execute(sql, tuple(args))
+        return cur.fetchall()
+
+    def list_events(self, *, limit: int = 40) -> List[sqlite3.Row]:
+        self.conn.row_factory = sqlite3.Row
+        cur = self.conn.execute(
+            """
+            SELECT id, domain, submission_url, event_type, before_json, after_json, detected_at
+            FROM submission_target_events
+            ORDER BY detected_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return cur.fetchall()
+
+    def prune_scanned_domains(self, scanned_domains: Sequence[str], keep_fingerprints: Sequence[str]) -> int:
+        domains = [d.strip().lower() for d in scanned_domains if d and _is_target_domain(d.strip().lower())]
+        if not domains:
+            return 0
+        domains = list(dict.fromkeys(domains))
+        keep = [fp.strip() for fp in keep_fingerprints if fp.strip()]
+        keep = list(dict.fromkeys(keep))
+
+        before = self.conn.total_changes
+        with self.conn:
+            domain_placeholders = ",".join(["?"] * len(domains))
+            if keep:
+                keep_placeholders = ",".join(["?"] * len(keep))
+                sql = (
+                    f"DELETE FROM submission_targets "
+                    f"WHERE domain IN ({domain_placeholders}) "
+                    f"AND fingerprint NOT IN ({keep_placeholders})"
+                )
+                args: Tuple[object, ...] = tuple(domains) + tuple(keep)
+            else:
+                sql = f"DELETE FROM submission_targets WHERE domain IN ({domain_placeholders})"
+                args = tuple(domains)
+            self.conn.execute(sql, args)
+        return self.conn.total_changes - before
+
+    def cleanup_noise(self) -> int:
+        before = self.conn.total_changes
+        with self.conn:
+            placeholders = ",".join(["?"] * len(NON_TARGET_DOMAINS))
+            self.conn.execute(
+                f"DELETE FROM submission_targets WHERE domain IN ({placeholders})",
+                tuple(sorted(NON_TARGET_DOMAINS)),
+            )
+            # Remove weak generic contact pages that do not show explicit pitch/apply intent.
+            self.conn.execute(
+                """
+                DELETE FROM submission_targets
+                WHERE lower(submission_url) LIKE '%/contact%'
+                  AND evidence NOT LIKE '%phrase:pitch us%'
+                  AND evidence NOT LIKE '%phrase:submit your pitch%'
+                  AND evidence NOT LIKE '%embed:%'
+                  AND evidence NOT LIKE '%email:%'
+                  AND evidence NOT LIKE '%policy:intro-only%'
+                """
+            )
+            # Remove weak "embedded form" detections that do not expose a real submission path.
+            self.conn.execute(
+                """
+                DELETE FROM submission_targets
+                WHERE evidence LIKE 'embed:%'
+                  AND evidence NOT LIKE '%| path:%'
+                  AND evidence NOT LIKE '%| phrase:%'
+                  AND evidence NOT LIKE '%| email:%'
+                  AND lower(submission_url) NOT LIKE '%apply%'
+                  AND lower(submission_url) NOT LIKE '%pitch%'
+                  AND lower(submission_url) NOT LIKE '%submit%'
+                  AND lower(submission_url) NOT LIKE '%grant%'
+                  AND lower(submission_url) NOT LIKE '%typeform%'
+                  AND lower(submission_url) NOT LIKE '%airtable%'
+                  AND lower(submission_url) NOT LIKE '%forms.gle%'
+                  AND lower(submission_url) NOT LIKE '%docs.google.com/forms%'
+                """
+            )
+            # Remove generic form-host marketing pages (not actual submission forms).
+            self.conn.execute(
+                """
+                DELETE FROM submission_targets
+                WHERE lower(submission_url) LIKE '%airtable.com/solutions/%'
+                   OR lower(submission_url) LIKE '%airtable.com/templates/%'
+                   OR lower(submission_url) LIKE '%airtable.com/blog/%'
+                   OR lower(submission_url) LIKE '%airtable.com/product/%'
+                   OR lower(submission_url) LIKE '%airtable.com/internal/page_view%'
+                   OR lower(submission_url) LIKE '%typeform.com/templates/%'
+                   OR lower(submission_url) LIKE '%typeform.com/application-form-builder%'
+                """
+            )
+
+            self.conn.row_factory = sqlite3.Row
+            rows = self.conn.execute(
+                """
+                SELECT id, domain, submission_url, score, submission_type, status
+                FROM submission_targets
+                ORDER BY last_checked_at DESC, id DESC
+                """
+            ).fetchall()
+            ranked_rows = sorted(
+                rows,
+                key=lambda row: (
+                    0
+                    if any(
+                        tok in str(row["submission_url"]).lower()
+                        for tok in [
+                            "apply",
+                            "pitch",
+                            "submit",
+                            "grant",
+                            "application",
+                            "typeform",
+                            "airtable",
+                            "forms.gle",
+                            "docs.google.com/forms",
+                            "jotform",
+                            "tally.so",
+                        ]
+                    )
+                    else 1,
+                    {"form": 0, "email": 1, "intro-only": 2, "unknown": 3}.get(
+                        str(row["submission_type"]).strip().lower(), 3
+                    ),
+                    {"open": 0, "rolling": 1, "deadline": 2, "closed": 3}.get(
+                        str(row["status"]).strip().lower(), 4
+                    ),
+                    -int(row["score"] or 0),
+                    -int(row["id"]),
+                ),
+            )
+            keep: set[int] = set()
+            seen: set[Tuple[str, str]] = set()
+            root_count: Dict[str, int] = {}
+            for row in ranked_rows:
+                key = (
+                    str(row["domain"]).strip().lower(),
+                    re.sub(r"^https?://", "", str(row["submission_url"]).strip().lower()),
+                )
+                if key in seen:
+                    continue
+                root = _root_domain(str(row["domain"]).strip().lower())
+                if root:
+                    used = root_count.get(root, 0)
+                    if used >= 1:
+                        continue
+                    root_count[root] = used + 1
+                seen.add(key)
+                keep.add(int(row["id"]))
+            if keep:
+                keep_ids = sorted(keep)
+                placeholders_keep = ",".join(["?"] * len(keep_ids))
+                self.conn.execute(
+                    f"DELETE FROM submission_targets WHERE id NOT IN ({placeholders_keep})",
+                    tuple(keep_ids),
+                )
+        return self.conn.total_changes - before
+
+
+def now_utc_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def sanitize(text: str, limit: int = 1200) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip())[:limit]
+
+
+def _canonicalize_url(url: str) -> str:
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("//"):
+        raw = "https:" + raw
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", raw):
+        raw = "https://" + raw
+    parsed = urllib.parse.urlsplit(raw)
+    if parsed.scheme not in {"http", "https"}:
+        return ""
+    netloc = parsed.netloc.strip().lower()
+    if not netloc:
+        return ""
+    if netloc.endswith(":80") and parsed.scheme == "http":
+        netloc = netloc[:-3]
+    if netloc.endswith(":443") and parsed.scheme == "https":
+        netloc = netloc[:-4]
+    path = re.sub(r"//+", "/", parsed.path or "/")
+    if path != "/":
+        path = path.rstrip("/")
+    return urllib.parse.urlunsplit((parsed.scheme, netloc, path, "", ""))
+
+
+def _domain_key(url: str) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    host = parsed.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def _is_target_domain(domain: str) -> bool:
+    if not domain:
+        return False
+    if domain in NON_TARGET_DOMAINS:
+        return False
+    return not any(domain.endswith("." + d) for d in NON_TARGET_DOMAINS)
+
+
+def _has_submission_hint(text: str) -> bool:
+    t = (text or "").lower()
+    return any(h in t for h in ["apply", "pitch", "submit", "application", "grant", "founder", "cohort"])
+
+
+def _is_content_like_url(url: str) -> bool:
+    parsed = urllib.parse.urlsplit(url)
+    low = f"{parsed.netloc.lower()}{parsed.path.lower()}"
+    if _has_submission_hint(low):
+        return False
+    return any(marker in parsed.path.lower() for marker in CONTENT_PATH_MARKERS)
+
+
+def _normalize_seed_url(raw_url: str) -> str:
+    url = _canonicalize_url(raw_url)
+    if not url:
+        return ""
+    domain = _domain_key(url)
+    if not _is_target_domain(domain):
+        return ""
+    if _looks_actionable_form_url(url) or _looks_form_host(url):
+        return url
+
+    parsed = urllib.parse.urlsplit(url)
+    path_low = parsed.path.lower()
+    has_submission_path = any(h in path_low for h in DISCOVERY_PATH_HINTS)
+    if path_low and path_low != "/" and (not has_submission_path or _is_content_like_url(url)):
+        return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/", "", ""))
+    return url
+
+
+def _same_domain(a: str, b: str) -> bool:
+    return _domain_key(a) == _domain_key(b)
+
+
+def _root_domain(domain: str) -> str:
+    host = (domain or "").strip().lower()
+    if not host:
+        return ""
+    parts = [p for p in host.split(".") if p]
+    if len(parts) <= 2:
+        return ".".join(parts)
+    common_second_level_tlds = {"co.uk", "org.uk", "gov.uk", "co.jp", "com.au", "co.kr"}
+    tail = ".".join(parts[-2:])
+    if tail in common_second_level_tlds and len(parts) >= 3:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
+def _same_org_family(a: str, b: str) -> bool:
+    da = _root_domain(_domain_key(a))
+    db = _root_domain(_domain_key(b))
+    return bool(da and db and da == db)
+
+
+def _title_from_html(html: str) -> str:
+    m = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return ""
+    return sanitize(unescape(re.sub(r"<[^>]+>", " ", m.group(1))), limit=240)
+
+
+def _domain_to_org_name(domain: str) -> str:
+    base = (domain or "").split(".")[0].strip().lower()
+    if not base:
+        return "Unknown"
+    base = base.replace("-", " ").replace("_", " ")
+    base = re.sub(r"(accelerator|ventures|capital|foundation|labs|studio|partners|fund|dao|vc)$", r" \1", base)
+    base = re.sub(r"\s+", " ", base).strip()
+    name = base.title()
+    name = re.sub(r"\bVc\b", "VC", name)
+    name = re.sub(r"\bDao\b", "DAO", name)
+    name = re.sub(r"\bAi\b", "AI", name)
+    return sanitize(name, 120)
+
+
+def _normalize_org_name(name: str, domain: str) -> str:
+    cleaned = (name or "")
+    cleaned = re.sub(r"https?://\S+", "", cleaned)
+    cleaned = re.sub(r"[→↗↘↖↙]+", " ", cleaned)
+    cleaned = sanitize(cleaned, 120)
+    cleaned = cleaned.strip(" -|:")
+    if cleaned.lower() in {"accelerator", "program", "founders", "contact us", "apply", "home"}:
+        cleaned = ""
+    if any(
+        marker in cleaned.lower()
+        for marker in ["announcing ", "press release", "newsroom", "latest news", "welcome to"]
+    ):
+        cleaned = ""
+    brand = re.sub(r"[^a-z0-9]", "", (domain or "").split(".")[0].lower())
+    cleaned_alnum = re.sub(r"[^a-z0-9]", "", cleaned.lower())
+    if brand and brand not in cleaned_alnum and any(k in cleaned.lower() for k in ["world", "investor", "home"]):
+        cleaned = ""
+    if not cleaned:
+        return _domain_to_org_name(domain)
+    return cleaned
+
+
+def _infer_org_name(domain: str, title: str, hint: str) -> str:
+    hint_clean = sanitize(re.sub(r"https?://\S+", "", (hint or "").replace("→", " ")), 180)
+    hint_low = hint_clean.lower()
+    if hint_clean and not any(tok in hint_low for tok in GENERIC_TITLE_MARKERS):
+        return hint_clean
+
+    if title:
+        parts = re.split(r"\s*[|\-:\u2013\u2014]\s*", title)
+        for part in parts:
+            chunk = sanitize(part, 120)
+            low = chunk.lower()
+            if not chunk:
+                continue
+            if any(tok in low for tok in ["apply", "pitch", "submit", "application", "founder"]):
+                continue
+            if any(tok in low for tok in GENERIC_TITLE_MARKERS):
+                continue
+            if len(chunk) < 3:
+                continue
+            return chunk
+
+    return _domain_to_org_name(domain)
+
+
+def _fetch_html(url: str, timeout: int = 10) -> Tuple[str, str]:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        final_url = resp.geturl()
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        body = resp.read()
+    if "text/html" not in ctype and b"<html" not in body[:1000].lower():
+        return "", _canonicalize_url(final_url) or _canonicalize_url(url)
+    return body.decode("utf-8", errors="ignore"), (_canonicalize_url(final_url) or _canonicalize_url(url))
+
+
+def _strip_tags(html_fragment: str) -> str:
+    text = re.sub(r"<script[^>]*>.*?</script>", " ", html_fragment, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return sanitize(unescape(text), limit=12000)
+
+
+def _extract_links(base_url: str, html: str) -> List[Tuple[str, str]]:
+    out: List[Tuple[str, str]] = []
+    pattern = re.compile(
+        r"<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for href, label_html in pattern.findall(html):
+        label = sanitize(_strip_tags(label_html), limit=180)
+        joined = urllib.parse.urljoin(base_url, unescape(href.strip()))
+        url = _canonicalize_url(joined)
+        if not url:
+            continue
+        out.append((url, label))
+    return out
+
+
+def _extract_embed_form_urls(base_url: str, html: str) -> List[str]:
+    out: List[str] = []
+    patterns = [
+        r"https?://[^\s\"'<>]+",
+        r"//[^\s\"'<>]+",
+    ]
+    for pat in patterns:
+        for raw in re.findall(pat, html, flags=re.IGNORECASE):
+            candidate = _canonicalize_url(urllib.parse.urljoin(base_url, unescape(raw.strip())))
+            if not candidate:
+                continue
+            if _looks_actionable_form_url(candidate):
+                out.append(candidate)
+    return list(dict.fromkeys(out))
+
+
+def _looks_submission_link(url: str, text: str) -> bool:
+    merged = f"{url} {text}".lower()
+    return any(h in merged for h in DISCOVERY_PATH_HINTS)
+
+
+def _looks_form_host(url: str) -> bool:
+    domain = _domain_key(url)
+    if not domain:
+        return False
+    return any(marker in domain for marker in FORM_HOST_MARKERS)
+
+
+def _looks_actionable_form_url(url: str) -> bool:
+    domain = _domain_key(url)
+    path = urllib.parse.urlsplit(url).path.lower()
+    if not domain:
+        return False
+    if "airtable.com" in domain:
+        if any(path.startswith(prefix) for prefix in ["/solutions", "/templates", "/blog", "/product", "/universe"]):
+            return False
+        return "/form" in path or "/shr" in path or "/pag" in path or bool(re.search(r"/app[a-z0-9]+/", path))
+    if "typeform.com" in domain:
+        return "/to/" in path or "/form/" in path
+    if "docs.google.com" in domain:
+        return "/forms/" in path
+    if "forms.gle" in domain:
+        return True
+    if "tally.so" in domain:
+        return path.startswith("/r/") or path.startswith("/forms/") or len(path.strip("/")) >= 4
+    if any(host in domain for host in ["jotform.com", "submittable.com", "fillout.com", "hubspot.com", "wkf.ms"]):
+        return len(path.strip("/")) > 0
+    return _looks_form_host(url)
+
+
+def _score_submission_link(current_url: str, link_url: str, link_text: str) -> int:
+    merged = f"{link_url} {link_text}".lower()
+    path_low = urllib.parse.urlsplit(link_url).path.lower()
+    score = 0
+
+    strong_hint = any(h in merged for h in STRONG_PATH_HINTS)
+    discovery_hint = any(h in merged for h in DISCOVERY_PATH_HINTS)
+
+    if strong_hint:
+        score += 4
+    elif discovery_hint:
+        score += 1
+    if any(phrase in merged for phrase in SUBMISSION_PHRASES):
+        score += 4
+    if _looks_actionable_form_url(link_url):
+        score += 5
+    elif _looks_form_host(link_url):
+        score -= 2
+    if _same_org_family(current_url, link_url):
+        score += 2
+    if _same_domain(current_url, link_url):
+        score += 1
+    if any(m in merged for m in BAD_LINK_MARKERS):
+        score -= 6
+    if "refer" in path_low and not any(k in merged for k in ["apply", "pitch", "submit", "application"]):
+        score -= 4
+    if "contact" in path_low and not any(k in merged for k in ["pitch", "apply", "submit"]):
+        score -= 2
+    return score
+
+
+def _resolve_final_url(url: str, timeout: int = 10) -> str:
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": USER_AGENT, "Accept": "text/html,*/*;q=0.8"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            final_url = resp.geturl()
+        return _canonicalize_url(final_url) or _canonicalize_url(url)
+    except Exception:  # noqa: BLE001
+        return _canonicalize_url(url)
+
+
+def _pick_best_submission_url(current_url: str, html: str) -> Tuple[str, str, int]:
+    links = _extract_links(current_url, html)
+    for form_url in _extract_embed_form_urls(current_url, html):
+        links.append((form_url, "embedded form"))
+    best_url = _canonicalize_url(current_url)
+    best_score = 0
+    best_note = ""
+
+    for link_url, link_text in links:
+        if not link_url:
+            continue
+        score = _score_submission_link(current_url, link_url, link_text)
+        if score < 5:
+            continue
+        if score > best_score:
+            best_score = score
+            best_url = link_url
+            best_note = sanitize(f"best-link:{link_text or '-'}", limit=120)
+    picked = best_url or _canonicalize_url(current_url) or ""
+    current_domain = _domain_key(current_url)
+    picked_domain = _domain_key(picked)
+    needs_resolve = (
+        "/out/" in urllib.parse.urlsplit(picked).path.lower()
+        or "/redirect" in picked.lower()
+        or (picked_domain and current_domain and picked_domain != current_domain)
+    )
+    if picked and needs_resolve:
+        picked = _resolve_final_url(picked)
+    return picked, best_note, best_score
+
+
+def _classify_status(page_text: str) -> str:
+    text = page_text.lower()
+    if any(marker in text for marker in CLOSED_MARKERS):
+        return "closed"
+    if any(marker in text for marker in ROLLING_MARKERS):
+        return "rolling"
+    if re.search(r"\b(deadline|apply by|applications due|cohort starts?)\b", text):
+        return "deadline"
+    return "open"
+
+
+def _classify_org_type(page_text: str) -> str:
+    text = page_text.lower()
+    accel_score = sum(1 for k in ["accelerator", "cohort", "batch", "program"] if k in text)
+    vc_score = sum(1 for k in ["venture capital", "vc", "fund", "invest"] if k in text)
+    syndicate_score = sum(1 for k in ["syndicate", "angel list", "angel syndicate"] if k in text)
+    grant_score = sum(1 for k in ["grant", "grants", "foundation", "ecosystem fund"] if k in text)
+
+    if grant_score > max(accel_score, vc_score, syndicate_score) and grant_score > 0:
+        return "Grant"
+    if accel_score > max(vc_score, syndicate_score) and accel_score > 0:
+        return "Accelerator"
+    if syndicate_score > vc_score and syndicate_score > 0:
+        return "Angel syndicate"
+    if vc_score > 0:
+        return "VC"
+    return "Unknown"
+
+
+def _detect_requirements(page_text: str) -> str:
+    text = page_text.lower()
+    hits = [label for needle, label in REQUIREMENT_MARKERS if needle in text]
+    uniq = list(dict.fromkeys(hits))
+    return ", ".join(uniq[:4])
+
+
+def _embed_marker_has_submission_context(html_low: str, marker: str) -> bool:
+    pos = html_low.find(marker)
+    while pos >= 0:
+        snippet = html_low[max(0, pos - 280) : pos + 280]
+        if any(k in snippet for k in ["apply", "pitch", "submit", "application", "grant"]):
+            return True
+        pos = html_low.find(marker, pos + len(marker))
+    return False
+
+
+def _extract_pitch_emails(page_text: str) -> List[str]:
+    emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", page_text)
+    out: List[str] = []
+    for email in emails:
+        e = email.lower()
+        if any(tok in e for tok in ["pitch", "deal", "founder", "invest", "team"]):
+            out.append(e)
+    return list(dict.fromkeys(out))[:4]
+
+
+def _build_snapshot(text: str, text_low: str, phrase_hits: Sequence[str], path_hits: Sequence[str]) -> str:
+    anchor = ""
+    if phrase_hits:
+        anchor = phrase_hits[0]
+    elif path_hits:
+        anchor = path_hits[0]
+
+    if anchor:
+        idx = text_low.find(anchor)
+        if idx >= 0:
+            start = max(0, idx - 120)
+            end = min(len(text), idx + 220)
+            return sanitize(text[start:end], limit=360)
+    return sanitize(text[:320], limit=360)
+
+
+def _evaluate_page(url: str, source_url: str, html: str, org_hint: str) -> Optional[SubmissionTarget]:
+    html_low = html.lower()
+    text = _strip_tags(html)
+    text_low = text.lower()
+    parsed = urllib.parse.urlsplit(url)
+    path_low = parsed.path.lower()
+
+    domain = _domain_key(url)
+    if not _is_target_domain(domain):
+        return None
+
+    path_hits = [hint for hint in STRONG_PATH_HINTS if hint in path_low]
+    phrase_hits = [p for p in SUBMISSION_PHRASES if p in text_low]
+    strong_phrase_hits = [p for p in phrase_hits if p in STRONG_SUBMISSION_PHRASES]
+    has_form = "<form" in html_low
+    embed_hits = [m for m in FORM_EMBED_MARKERS if m in html_low and _embed_marker_has_submission_context(html_low, m)]
+    intro_only = any(m in text_low for m in INTRO_ONLY_MARKERS)
+    pitch_emails = _extract_pitch_emails(text)
+
+    # Avoid generic contact pages unless they clearly indicate pitch submission.
+    if "contact" in path_low:
+        contact_strong_phrases = {"pitch us", "submit your pitch", "deal submission", "founder application"}
+        has_contact_phrase = any(p in contact_strong_phrases for p in phrase_hits)
+        if not (has_contact_phrase or embed_hits or pitch_emails or intro_only):
+            return None
+
+    score = 0
+    evidence: List[str] = []
+
+    if path_hits:
+        score += min(4, len(path_hits) + 1)
+        evidence.append(f"path:{','.join(path_hits[:3])}")
+    if phrase_hits:
+        weak_hits = max(0, len(phrase_hits) - len(strong_phrase_hits))
+        score += min(6, len(strong_phrase_hits) * 2 + weak_hits)
+        evidence.append(f"phrase:{(strong_phrase_hits[0] if strong_phrase_hits else phrase_hits[0])}")
+    if has_form:
+        score += 4
+        evidence.append("html:form")
+    if embed_hits:
+        score += 4
+        evidence.append(f"embed:{embed_hits[0]}")
+    if intro_only:
+        score += 1
+        evidence.append("policy:intro-only")
+    if pitch_emails:
+        score += 3
+        evidence.append(f"email:{pitch_emails[0]}")
+
+    if score < 4:
+        return None
+
+    intent_signal = bool(path_hits or phrase_hits or embed_hits or pitch_emails or intro_only)
+    if not intent_signal:
+        return None
+
+    relevance = sum(1 for marker in RELEVANCE_MARKERS if marker in text_low)
+    if relevance == 0 and not any(k in org_hint.lower() for k in ["capital", "ventures", "accelerator", "fund"]):
+        return None
+
+    submission_type = "unknown"
+    if has_form or embed_hits:
+        submission_type = "form"
+    elif pitch_emails:
+        submission_type = "email"
+    elif intro_only:
+        submission_type = "intro-only"
+
+    status = _classify_status(text)
+    requirements = _detect_requirements(text)
+    title = _title_from_html(html)
+    org_name = _normalize_org_name(_infer_org_name(domain=domain, title=title, hint=org_hint), domain)
+    org_type = _classify_org_type(text)
+
+    notes_parts: List[str] = []
+    if status == "deadline":
+        notes_parts.append("deadline-like wording detected")
+    if intro_only:
+        notes_parts.append("warm-intro/referral wording detected")
+    if pitch_emails:
+        notes_parts.append(f"pitch email: {pitch_emails[0]}")
+    if title:
+        notes_parts.append(f"title: {title}")
+
+    submission_url, link_note, link_score = _pick_best_submission_url(url, html)
+    if not submission_url:
+        return None
+    submission_url_low = submission_url.lower()
+    if org_type == "VC":
+        org_name_low = org_name.lower()
+        if "grant" in org_name_low or "grant" in submission_url_low:
+            org_type = "Grant"
+        elif any(k in submission_url_low for k in ["accelerator", "cohort", "batch", "program"]):
+            org_type = "Accelerator"
+    has_submission_url_signal = (
+        _looks_actionable_form_url(submission_url)
+        or any(
+            token in submission_url_low
+            for token in ["apply", "pitch", "submit", "grant", "application", "/form", "typeform", "airtable"]
+        )
+    )
+    if link_score > 0:
+        score += min(6, link_score)
+    if link_note:
+        evidence.append(link_note)
+        if submission_url != _canonicalize_url(url):
+            notes_parts.append("submission link selected from page anchors")
+
+    if submission_type == "unknown":
+        note_low = link_note.lower()
+        if (
+            _looks_actionable_form_url(submission_url)
+            or "/apply" in submission_url.lower()
+            or "/pitch" in submission_url.lower()
+            or "/submit" in submission_url.lower()
+            or link_score >= 8
+            or any(k in note_low for k in ["apply", "pitch", "submit", "application"])
+        ):
+            submission_type = "form"
+
+    # Reject weak article/news URLs unless they expose explicit submission mechanics.
+    if not has_submission_url_signal and not pitch_emails and not intro_only:
+        has_explicit_submission_page = bool(strong_phrase_hits and (has_form or embed_hits))
+        if not has_explicit_submission_page:
+            return None
+
+    snapshot = _build_snapshot(text=text, text_low=text_low, phrase_hits=phrase_hits, path_hits=path_hits)
+
+    return SubmissionTarget(
+        org_name=org_name,
+        org_type=org_type,
+        domain=domain,
+        source_url=source_url,
+        submission_url=submission_url,
+        submission_type=submission_type,
+        status=status,
+        requirements=requirements,
+        notes=sanitize("; ".join(notes_parts), limit=500),
+        evidence=sanitize(" | ".join(evidence), limit=500),
+        source_page_snapshot=snapshot,
+        score=score,
+    )
+
+
+def _candidate_rank(target: SubmissionTarget) -> Tuple[int, int, int, int, int]:
+    submission_rank = {"form": 0, "email": 1, "intro-only": 2, "unknown": 3}.get(target.submission_type, 3)
+    status_rank = {"open": 0, "rolling": 1, "deadline": 2, "closed": 3}.get(target.status, 4)
+    url_low = target.submission_url.lower()
+    url_rank = 1
+    if any(k in url_low for k in ["apply", "pitch", "submit", "form", "typeform", "airtable", "forms.gle"]):
+        url_rank = 0
+    return (submission_rank, status_rank, url_rank, -target.score, len(target.submission_url))
+
+
+def _scan_site(seed: DiscoverySeed, max_pages: int = 6, http_timeout: int = 10) -> Optional[SubmissionTarget]:
+    root = _canonicalize_url(seed.url)
+    if not root:
+        return None
+
+    root_home = urllib.parse.urlunsplit((urllib.parse.urlsplit(root).scheme, urllib.parse.urlsplit(root).netloc, "/", "", ""))
+    queue: deque[str] = deque([root])
+    if root_home != root:
+        queue.append(root_home)
+
+    visited: set[str] = set()
+    best: Optional[SubmissionTarget] = None
+
+    while queue and len(visited) < max_pages:
+        current = queue.popleft()
+        if current in visited:
+            continue
+        visited.add(current)
+
+        try:
+            html, resolved_current = _fetch_html(current, timeout=http_timeout)
+        except Exception:  # noqa: BLE001
+            continue
+        if not html:
+            continue
+        page_url = resolved_current or current
+        if page_url not in visited:
+            visited.add(page_url)
+
+        candidate = _evaluate_page(url=page_url, source_url=seed.url, html=html, org_hint=seed.org_name_hint)
+        if candidate and (best is None or _candidate_rank(candidate) < _candidate_rank(best)):
+            best = candidate
+
+        for link_url, link_text in _extract_links(page_url, html):
+            if link_url in visited:
+                continue
+            if not _looks_submission_link(link_url, link_text):
+                continue
+            if _same_domain(root, link_url) or _same_org_family(root, link_url):
+                queue.append(link_url)
+
+    return best
+
+
+def _decode_ddg_url(url: str) -> str:
+    clean = unescape(url.strip())
+    if clean.startswith("//"):
+        clean = "https:" + clean
+    if "duckduckgo.com/l/?" not in clean:
+        return clean
+    parsed = urllib.parse.urlsplit(clean)
+    q = urllib.parse.parse_qs(parsed.query)
+    uddg = q.get("uddg", [""])[0]
+    return urllib.parse.unquote(uddg) if uddg else clean
+
+
+def _search_duckduckgo(query: str, max_results: int = 8) -> List[Tuple[str, str]]:
+    url = "https://duckduckgo.com/html/?q=" + urllib.parse.quote_plus(query)
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=25) as resp:
+        html = resp.read().decode("utf-8", errors="ignore")
+
+    out: List[Tuple[str, str]] = []
+    pattern = re.compile(
+        r"<a[^>]+class=\"[^\"]*result__a[^\"]*\"[^>]+href=\"([^\"]+)\"[^>]*>(.*?)</a>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for href, label_html in pattern.findall(html):
+        target = _canonicalize_url(_decode_ddg_url(href))
+        if not target:
+            continue
+        label = sanitize(_strip_tags(label_html), limit=160)
+        out.append((target, label))
+        if len(out) >= max_results:
+            break
+    return out
+
+
+def _load_submission_target_seeds(db_path: str, limit: int = 240) -> List[DiscoverySeed]:
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.execute(
+            """
+            SELECT submission_url, source_url, org_name, score, status
+            FROM submission_targets
+            WHERE submission_url <> '' OR source_url <> ''
+            ORDER BY score DESC, last_checked_at DESC, id DESC
+            LIMIT ?
+            """,
+            (max(200, limit * 3),),
+        )
+    except sqlite3.OperationalError:
+        conn.close()
+        return []
+
+    ranked_rows: List[Tuple[int, str, str]] = []
+    for submission_url, source_url, org_name, score, status in cur.fetchall():
+        preferred_url = str(submission_url or "").strip() or str(source_url or "").strip()
+        url = _normalize_seed_url(preferred_url)
+        if not url:
+            continue
+        ranked = int(score or 0)
+        status_low = str(status or "").strip().lower()
+        if status_low in {"open", "rolling"}:
+            ranked += 4
+        elif status_low == "deadline":
+            ranked += 2
+        ranked_rows.append((ranked, url, str(org_name or "")))
+
+    ranked_rows.sort(key=lambda x: x[0], reverse=True)
+    out: List[DiscoverySeed] = []
+    seen_domains: set[str] = set()
+    for _, url, org_name in ranked_rows:
+        domain = _domain_key(url)
+        if not domain or domain in seen_domains:
+            continue
+        seen_domains.add(domain)
+        out.append(
+            DiscoverySeed(
+                url=url,
+                org_name_hint=sanitize(org_name, limit=120),
+                source="submission-db",
+            )
+        )
+        if len(out) >= limit:
+            break
+    conn.close()
+    return out
+
+
+def _load_fundraise_seeds(db_path: str, limit: int = 300) -> List[DiscoverySeed]:
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.execute(
+            """
+            SELECT website, org_name, category, status, notes
+            FROM fundraising_records
+            WHERE website <> ''
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (max(1200, limit * 6),),
+        )
+    except sqlite3.OperationalError:
+        conn.close()
+        return []
+
+    def rank_seed(website: str, org_name: str, category: str, status: str, notes: str) -> int:
+        w = (website or "").lower()
+        o = (org_name or "").lower()
+        c = (category or "").lower()
+        s = (status or "").lower()
+        n = (notes or "").lower()
+        score = 0
+        if any(k in w for k in ["apply", "pitch", "submit", "grant", "accelerator", "form", "founder"]):
+            score += 8
+        if any(k in w for k in ["vc", "venture", "capital", "fund"]):
+            score += 4
+        if any(k in o for k in ["vc", "venture", "capital", "fund", "accelerator", "grant", "foundation", "dao"]):
+            score += 4
+        if "accelerator_program" in c or "grants_program" in c:
+            score += 7
+        elif any(k in c for k in ["web3_vc", "web2_vc", "xlsx:web3 vc", "xlsx:web2 vc"]):
+            score += 5
+        elif "vc_contact" in c:
+            score += 2
+        if any(k in s for k in ["진행", "open", "rolling", "활성"]):
+            score += 2
+        if any(k in s for k in ["closed", "마감"]):
+            score -= 2
+        if any(k in n for k in ["apply", "pitch", "submit", "deadline", "rolling"]):
+            score += 2
+        if _is_content_like_url(w):
+            score -= 5
+        return score
+
+    ranked_rows: List[Tuple[int, str, str, str]] = []
+    for website, org_name, category, status, notes in cur.fetchall():
+        seed_url = _normalize_seed_url(str(website or ""))
+        if not seed_url:
+            continue
+        ranked_rows.append(
+            (
+                rank_seed(
+                    str(website or ""),
+                    str(org_name or ""),
+                    str(category or ""),
+                    str(status or ""),
+                    str(notes or ""),
+                ),
+                seed_url,
+                str(org_name or ""),
+                str(category or ""),
+            )
+        )
+
+    best_by_domain: Dict[str, Tuple[int, str, str, str]] = {}
+    for row in ranked_rows:
+        domain = _domain_key(row[1])
+        if not domain:
+            continue
+        prev = best_by_domain.get(domain)
+        if prev is None or row[0] > prev[0]:
+            best_by_domain[domain] = row
+
+    ranked_rows = sorted(best_by_domain.values(), key=lambda x: x[0], reverse=True)
+    seen_domains: set[str] = set()
+    out: List[DiscoverySeed] = []
+    for _, url, org_name, category in ranked_rows:
+        domain = _domain_key(url)
+        if domain in seen_domains:
+            continue
+        seen_domains.add(domain)
+        out.append(
+            DiscoverySeed(
+                url=url,
+                org_name_hint=sanitize(org_name, limit=120),
+                source=f"fundraise-db:{sanitize(category, limit=80)}",
+            )
+        )
+        if len(out) >= limit:
+            break
+    conn.close()
+    return out
+
+
+def _dedupe_seeds(seeds: Iterable[DiscoverySeed], *, max_sites: int) -> List[DiscoverySeed]:
+    out: List[DiscoverySeed] = []
+    seen: set[str] = set()
+    for seed in seeds:
+        domain = _domain_key(seed.url)
+        if not domain or domain in seen:
+            continue
+        if not _is_target_domain(domain):
+            continue
+        seen.add(domain)
+        out.append(seed)
+        if len(out) >= max_sites:
+            break
+    return out
+
+
+def _load_query_file(path: str) -> List[str]:
+    p = Path(path).expanduser()
+    if not p.exists():
+        return []
+    out: List[str] = []
+    for raw in p.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        out.append(line)
+    return out
+
+
+def _parse_terms(raw: str) -> List[str]:
+    terms = [t.strip() for t in raw.split(",") if t.strip()]
+    return list(dict.fromkeys(terms))
+
+
+def _extend_queries_with_focus(queries: List[str], *, sectors: Sequence[str], stages: Sequence[str], regions: Sequence[str]) -> List[str]:
+    out = list(queries)
+    templates = [
+        '"{term}" "pitch us" "venture capital"',
+        '"{term}" "submit your pitch" vc',
+        '"{term}" accelerator apply',
+        '"{term}" "startup program" apply',
+    ]
+    for term in list(sectors) + list(stages) + list(regions):
+        for t in templates:
+            out.append(t.format(term=term))
+    deduped: List[str] = []
+    seen: set[str] = set()
+    for q in out:
+        k = q.strip().lower()
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        deduped.append(q)
+    return deduped
+
+
+def _rows_to_json(rows: Sequence[sqlite3.Row]) -> List[Dict[str, object]]:
+    out: List[Dict[str, object]] = []
+    for row in rows:
+        out.append(
+            {
+                "org_name": row["org_name"],
+                "org_type": row["org_type"],
+                "domain": row["domain"],
+                "submission_url": row["submission_url"],
+                "submission_type": row["submission_type"],
+                "status": row["status"],
+                "requirements": row["requirements"],
+                "notes": row["notes"],
+                "source_page_snapshot": row["source_page_snapshot"],
+                "evidence": row["evidence"],
+                "score": row["score"],
+                "last_checked_at": row["last_checked_at"],
+            }
+        )
+    return out
+
+
+def _priority_for_row(row: sqlite3.Row) -> str:
+    status = str(row["status"]).strip().lower()
+    submission_type = str(row["submission_type"]).strip().lower()
+    score = int(row["score"] or 0)
+
+    if status in {"open", "rolling"} and submission_type == "form" and score >= 12:
+        return "P0"
+    if status in {"open", "rolling"} and score >= 9:
+        return "P1"
+    if status == "deadline" and score >= 8:
+        return "P2"
+    return "P3"
+
+
+def _status_rank(status: str) -> int:
+    s = (status or "").strip().lower()
+    if s == "open":
+        return 0
+    if s == "rolling":
+        return 1
+    if s == "deadline":
+        return 2
+    if s == "closed":
+        return 3
+    return 4
+
+
+def _priority_rank(priority: str) -> int:
+    p = (priority or "").strip().upper()
+    if p == "P0":
+        return 0
+    if p == "P1":
+        return 1
+    if p == "P2":
+        return 2
+    return 3
+
+
+def _sort_rows_for_report(rows: Sequence[sqlite3.Row]) -> List[sqlite3.Row]:
+    return sorted(
+        rows,
+        key=lambda r: (
+            _priority_rank(_priority_for_row(r)),
+            _status_rank(str(r["status"])),
+            -int(r["score"] or 0),
+            str(r["org_name"]).lower(),
+        ),
+    )
+
+
+def _render_submission_report(rows: Sequence[sqlite3.Row], events: Sequence[sqlite3.Row]) -> str:
+    lines: List[str] = []
+    ordered_rows = _sort_rows_for_report(rows)
+
+    lines.append("# VC Submission Targets")
+    lines.append("")
+    lines.append(f"_Generated at: {now_utc_iso()}_")
+    lines.append("")
+
+    total_targets = len(ordered_rows)
+    open_count = sum(1 for r in ordered_rows if str(r["status"]).lower() == "open")
+    rolling_count = sum(1 for r in ordered_rows if str(r["status"]).lower() == "rolling")
+    deadline_count = sum(1 for r in ordered_rows if str(r["status"]).lower() == "deadline")
+    closed_count = sum(1 for r in ordered_rows if str(r["status"]).lower() == "closed")
+    high_priority_count = sum(1 for r in ordered_rows if _priority_for_row(r) in {"P0", "P1"})
+
+    lines.append("## Summary")
+    lines.append("")
+    lines.append(f"- total_targets: {total_targets}")
+    lines.append(f"- high_priority(P0/P1): {high_priority_count}")
+    lines.append(f"- status_breakdown: open={open_count}, rolling={rolling_count}, deadline={deadline_count}, closed={closed_count}")
+    lines.append(f"- recent_events: {len(events)}")
+    lines.append("")
+
+    if ordered_rows:
+        lines.append("## Quick Table")
+        lines.append("")
+        lines.append("| # | Priority | Organization | Org Type | Submission | Status | Score | Link |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+        for idx, row in enumerate(ordered_rows, start=1):
+            priority = _priority_for_row(row)
+            org_name = sanitize(str(row["org_name"]), limit=90).replace("|", "/")
+            org_type = str(row["org_type"]).replace("|", "/")
+            submission_type = str(row["submission_type"]).replace("|", "/")
+            status = str(row["status"]).replace("|", "/")
+            score = int(row["score"] or 0)
+            url = str(row["submission_url"])
+            link = f"[open]({url})"
+            lines.append(
+                f"| {idx} | {priority} | {org_name} | {org_type} | {submission_type} | {status} | {score} | {link} |"
+            )
+        lines.append("")
+
+        top_open = [r for r in ordered_rows if str(r["status"]).lower() in {"open", "rolling"}][:5]
+        if top_open:
+            lines.append("## Immediate Action Queue")
+            lines.append("")
+            for idx, row in enumerate(top_open, start=1):
+                priority = _priority_for_row(row)
+                org_name = sanitize(str(row["org_name"]), limit=100)
+                requirements = sanitize(str(row["requirements"] or "-"), limit=140)
+                lines.append(
+                    f"{idx}. [{priority}] {org_name} | score={int(row['score'] or 0)} | {row['submission_url']} | requirements={requirements}"
+                )
+            lines.append("")
+
+    if events:
+        lines.append("## Recent Changes")
+        lines.append("")
+        for e in events:
+            lines.append(f"- {e['detected_at']} | {e['event_type']} | {e['domain']} | {e['submission_url']}")
+        lines.append("")
+
+    lines.append("## Detailed Targets")
+    lines.append("")
+    for idx, row in enumerate(ordered_rows, start=1):
+        lines.append(f"### {idx}. {row['org_name']} ({row['org_type']})")
+        lines.append(f"- priority: {_priority_for_row(row)}")
+        lines.append(f"- domain: {row['domain']}")
+        lines.append(f"- submission_url: {row['submission_url']}")
+        lines.append(f"- submission_type: {row['submission_type']}")
+        lines.append(f"- status: {row['status']}")
+        lines.append(f"- score: {row['score']}")
+        if row["requirements"]:
+            lines.append(f"- requirements: {row['requirements']}")
+        if row["notes"]:
+            lines.append(f"- notes: {row['notes']}")
+        if row["evidence"]:
+            lines.append(f"- evidence: {row['evidence']}")
+        if row["source_page_snapshot"]:
+            lines.append(f"- source_page_snapshot: {sanitize(row['source_page_snapshot'], limit=260)}")
+        lines.append(f"- last_checked_at: {row['last_checked_at']}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def submission_scan_command(args: argparse.Namespace) -> int:
+    store = SubmissionStore(args.db)
+
+    manual_seeds = [s.strip() for s in (args.seed_urls or "").split(",") if s.strip()]
+    seeds: List[DiscoverySeed] = [
+        DiscoverySeed(url=_normalize_seed_url(u), org_name_hint="", source="manual") for u in manual_seeds
+    ]
+
+    # Re-check previously known submission targets first, then expand to fundraising DB websites.
+    seeds.extend(_load_submission_target_seeds(args.db, limit=max(120, min(args.max_sites * 3, 360))))
+
+    if args.from_fundraise:
+        seeds.extend(_load_fundraise_seeds(args.db, limit=args.fundraise_seed_limit))
+
+    queries: List[str] = list(args.query or [])
+    if args.query_file:
+        queries.extend(_load_query_file(args.query_file))
+    if not queries and not args.skip_search:
+        queries = list(DEFAULT_DISCOVERY_QUERIES)
+
+    sectors = _parse_terms(args.sector)
+    stages = _parse_terms(args.stage)
+    regions = _parse_terms(args.region)
+    queries = _extend_queries_with_focus(queries, sectors=sectors, stages=stages, regions=regions)
+
+    if not args.skip_search:
+        for query in queries:
+            try:
+                hits = _search_duckduckgo(query, max_results=args.max_results_per_query)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[warn] search failed query={query!r}: {exc}")
+                continue
+            for url, title in hits:
+                seeds.append(DiscoverySeed(url=_normalize_seed_url(url), org_name_hint=title, source=f"search:{query}"))
+
+    deduped = _dedupe_seeds(seeds, max_sites=args.max_sites)
+    source_counts_raw: Dict[str, int] = {}
+    for seed in seeds:
+        if not seed.url:
+            continue
+        key = seed.source.split(":", 1)[0]
+        source_counts_raw[key] = source_counts_raw.get(key, 0) + 1
+
+    source_counts_deduped: Dict[str, int] = {}
+    for seed in deduped:
+        key = seed.source.split(":", 1)[0]
+        source_counts_deduped[key] = source_counts_deduped.get(key, 0) + 1
+
+    raw_desc = ", ".join(f"{k}={v}" for k, v in sorted(source_counts_raw.items())) or "none"
+    deduped_desc = ", ".join(f"{k}={v}" for k, v in sorted(source_counts_deduped.items())) or "none"
+    print(f"[info] seeds={len(deduped)} (raw={len(seeds)})")
+    print(f"[info] seed_sources(raw)={raw_desc}")
+    print(f"[info] seed_sources(deduped)={deduped_desc}")
+    preview_groups: Dict[str, List[DiscoverySeed]] = {}
+    for seed in deduped:
+        key = seed.source.split(":", 1)[0]
+        preview_groups.setdefault(key, []).append(seed)
+    for key in sorted(preview_groups):
+        for seed in preview_groups[key][:6]:
+            print(
+                f"[seed:{key}] src={seed.source} org={seed.org_name_hint or '-'} "
+                f"url={seed.url}"
+            )
+
+    found: List[SubmissionTarget] = []
+    scanned_domains: List[str] = []
+    for idx, seed in enumerate(deduped, start=1):
+        if not seed.url:
+            continue
+        scanned_domains.append(_domain_key(seed.url))
+        target = _scan_site(seed, max_pages=args.max_pages_per_site, http_timeout=args.http_timeout)
+        if not target:
+            continue
+        found.append(target)
+        print(
+            f"[hit] {idx}/{len(deduped)} {target.org_name} | {target.submission_type} | "
+            f"{target.status} | score={target.score} | {target.submission_url}"
+        )
+
+    changed = store.upsert_targets(found)
+    pruned = store.prune_scanned_domains(scanned_domains, [t.fingerprint for t in found])
+    cleaned = store.cleanup_noise()
+    rows = store.list_targets(
+        limit=args.report_limit,
+        status=args.status_filter,
+        org_type=args.org_type_filter,
+        min_score=args.min_score,
+    )
+    events = store.list_events(limit=args.event_limit)
+
+    output = Path(args.output).expanduser()
+    ensure_parent_dir(str(output))
+    output.write_text(_render_submission_report(rows, events), encoding="utf-8")
+
+    if args.json_output:
+        json_path = Path(args.json_output).expanduser()
+        ensure_parent_dir(str(json_path))
+        payload = {
+            "generated_at": now_utc_iso(),
+            "filters": {
+                "status": args.status_filter,
+                "org_type": args.org_type_filter,
+                "min_score": args.min_score,
+            },
+            "items": _rows_to_json(rows),
+        }
+        json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[done] json={json_path} rows={len(rows)}")
+
+    print(
+        f"[done] scanned={len(deduped)} found={len(found)} changed={changed} pruned={pruned} cleaned={cleaned} "
+        f"report={output}"
+    )
+    return 0
+
+
+def submission_list_command(args: argparse.Namespace) -> int:
+    store = SubmissionStore(args.db)
+    rows = store.list_targets(
+        limit=args.limit,
+        status=args.status_filter,
+        org_type=args.org_type_filter,
+        min_score=args.min_score,
+    )
+    if not rows:
+        print("(no submission targets)")
+        return 0
+
+    ordered_rows = _sort_rows_for_report(rows)
+    print("priority\torg_name\torg_type\tsubmission_type\tstatus\tscore\tsubmission_url")
+    for row in ordered_rows:
+        print(
+            "\t".join(
+                [
+                    _priority_for_row(row),
+                    str(row["org_name"]),
+                    str(row["org_type"]),
+                    str(row["submission_type"]),
+                    str(row["status"]),
+                    str(row["score"]),
+                    str(row["submission_url"]),
+                ]
+            )
+        )
+    return 0
+
+
+def submission_report_command(args: argparse.Namespace) -> int:
+    store = SubmissionStore(args.db)
+    rows = store.list_targets(
+        limit=args.limit,
+        status=args.status_filter,
+        org_type=args.org_type_filter,
+        min_score=args.min_score,
+    )
+    events = store.list_events(limit=args.event_limit)
+    output = Path(args.output).expanduser()
+    ensure_parent_dir(str(output))
+    output.write_text(_render_submission_report(rows, events), encoding="utf-8")
+    print(f"[done] report={output} rows={len(rows)} events={len(events)}")
+    return 0
+
+
+def submission_export_command(args: argparse.Namespace) -> int:
+    store = SubmissionStore(args.db)
+    rows = store.list_targets(
+        limit=args.limit,
+        status=args.status_filter,
+        org_type=args.org_type_filter,
+        min_score=args.min_score,
+    )
+    output = Path(args.output).expanduser()
+    ensure_parent_dir(str(output))
+    payload = {
+        "generated_at": now_utc_iso(),
+        "schema": {
+            "org_name": "string",
+            "org_type": "VC|Accelerator|Grant|Angel syndicate|Unknown",
+            "submission_url": "string(url)",
+            "submission_type": "form|email|intro-only|unknown",
+            "status": "open|rolling|deadline|closed",
+            "requirements": "string",
+            "notes": "string",
+            "source_page_snapshot": "string",
+            "evidence": "string",
+            "score": "number",
+            "last_checked_at": "string(iso8601)",
+        },
+        "items": _rows_to_json(rows),
+    }
+    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[done] export={output} rows={len(rows)}")
+    return 0
