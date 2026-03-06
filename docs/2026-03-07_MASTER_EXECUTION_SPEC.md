@@ -508,3 +508,7 @@ multi-tenant API
 구현 청사진:
 
 - [2026-03-07_IMPLEMENTATION_BLUEPRINT.md](/Users/ej/Downloads/문서/VC_Fundraising/VC%20list/fundlist-git/docs/2026-03-07_IMPLEMENTATION_BLUEPRINT.md)
+
+운영 실패/재시도/idempotency/review/webhook 계약:
+
+- [2026-03-07_RUNTIME_AND_FAILURE_SPEC.md](/Users/ej/Downloads/문서/VC_Fundraising/VC%20list/fundlist-git/docs/2026-03-07_RUNTIME_AND_FAILURE_SPEC.md)
