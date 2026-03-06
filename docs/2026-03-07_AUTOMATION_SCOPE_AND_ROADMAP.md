@@ -457,3 +457,5 @@ MVP가 성공했다고 말할 기준:
 5. `public API on top`
 
 이 순서로 가야 자동화 범위를 최대한 넓히면서도 시스템이 망가지지 않는다.
+
+실제 파일/테이블/명령 기준 구현 청사진은 [2026-03-07_IMPLEMENTATION_BLUEPRINT.md](./2026-03-07_IMPLEMENTATION_BLUEPRINT.md)에 정리한다.
