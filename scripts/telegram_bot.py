@@ -24,6 +24,8 @@ DEFAULT_OPENCLAW_REPORT = ROOT / "data" / "reports" / "openclaw_multi_agent_repo
 DEFAULT_VC_OPS_REPORT = ROOT / "data" / "reports" / "vc_ops_report.md"
 DEFAULT_SUBMISSION_REPORT = ROOT / "data" / "reports" / "submission_targets_report.md"
 DEFAULT_SUBMISSION_JSON = ROOT / "data" / "reports" / "submission_targets.json"
+DEFAULT_FALLBACK_REPORT = ROOT / "data" / "reports" / "submission_fallback_report.md"
+DEFAULT_FALLBACK_JSON = ROOT / "data" / "reports" / "submission_fallback.json"
 CHAT_HISTORY: Dict[int, Deque[Dict[str, str]]] = {}
 
 
@@ -706,7 +708,10 @@ def build_quickstart_text() -> str:
             "/scan_failures 20",
             "/retry_failed 50",
             "",
-            "9. 불확실 항목 검토하기",
+            "9. AI fallback으로 실패 복구하기",
+            "/retry_failed_ai 20",
+            "",
+            "10. 불확실 항목 검토하기",
             "/review_queue 20",
             "",
             "더 자세한 설명:",
@@ -774,6 +779,8 @@ def build_help_text(
                     "  unresolved scan failure 목록",
                     "/retry_failed [limit]",
                     "  실패한 seed만 재시도",
+                    "/retry_failed_ai [limit]",
+                    "  검색 + AI 후보선택으로 실패 seed 복구 시도",
                     "/review_queue [limit]",
                     "  실패 항목 + 불확실 target 검토 큐",
                     "/apply_open [limit]",
@@ -852,10 +859,12 @@ def build_help_text(
                     "   중단/예외 난 seed 확인",
                     "5. /retry_failed 50",
                     "   실패 seed만 다시 스캔",
-                    "6. /review_queue 20",
+                    "6. /retry_failed_ai 20",
+                    "   검색 + AI fallback으로 대체 링크 복구",
+                    "7. /review_queue 20",
                     "   실패 + unknown 항목 검토",
-                    "7. 이상한 항목은 공식 링크 직접 열어 확인",
-                    "8. 맞는 항목은 /task_create <query>",
+                    "8. 이상한 항목은 공식 링크 직접 열어 확인",
+                    "9. 맞는 항목은 /task_create <query>",
                     "",
                     "이상 징후 예:",
                     "- closed 인데 open 으로 보임",
@@ -907,6 +916,7 @@ def build_help_text(
                 "/submission_scan [full|query]",
                 "/scan_failures [limit]",
                 "/retry_failed [limit]",
+                "/retry_failed_ai [limit]",
                 "/review_queue [limit]",
                 "/apply_open [limit]",
                 "/apply_deadline [limit]",
@@ -1289,6 +1299,28 @@ def handle_command(
         ]
         code, out = run_local_command(run_cmd, timeout_sec=1200)
         msg = [format_command_result("retry-failed", code, out, max_lines=50), "", read_report(DEFAULT_SUBMISSION_REPORT)]
+        client.send_message(chat_id, "\n".join(msg))
+        return
+
+    if cmd == "/retry_failed_ai":
+        limit = os.environ.get("VC_SUBMISSION_FAILURE_LIMIT", "20")
+        if arg and arg.strip().isdigit():
+            limit = str(max(1, min(100, int(arg.strip()))))
+        run_cmd = fundlist + [
+            "submission-fallback",
+            "--limit",
+            limit,
+            "--output",
+            str(DEFAULT_FALLBACK_REPORT),
+            "--json-output",
+            str(DEFAULT_FALLBACK_JSON),
+            "--refresh-submission-report",
+            str(DEFAULT_SUBMISSION_REPORT),
+            "--refresh-submission-json",
+            str(DEFAULT_SUBMISSION_JSON),
+        ]
+        code, out = run_local_command(run_cmd, timeout_sec=1200)
+        msg = [format_command_result("retry-failed-ai", code, out, max_lines=50), "", read_report(DEFAULT_FALLBACK_REPORT)]
         client.send_message(chat_id, "\n".join(msg))
         return
 

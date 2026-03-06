@@ -17,6 +17,7 @@ from .fundraising import (
 )
 from .openclaw import openclaw_multi_command
 from .review_queue import review_queue_command
+from .submission_fallback import DEFAULT_FALLBACK_JSON, DEFAULT_FALLBACK_PROVIDER, DEFAULT_FALLBACK_REPORT, submission_fallback_command
 from .submission_finder import (
     scan_failures_command,
     submission_export_command,
@@ -90,9 +91,19 @@ DEFAULT_SUBMISSION_REPORT_PATH = os.environ.get(
     "SUBMISSION_REPORT_PATH",
     str(PROJECT_ROOT / "data" / "reports" / "submission_targets_report.md"),
 )
+DEFAULT_SUBMISSION_JSON_PATH = os.environ.get(
+    "SUBMISSION_JSON_PATH",
+    str(PROJECT_ROOT / "data" / "reports" / "submission_targets.json"),
+)
 DEFAULT_CHANGES_REPORT_PATH = os.environ.get(
     "CHANGES_REPORT_PATH",
     str(PROJECT_ROOT / "data" / "reports" / "opportunity_changes_report.md"),
+)
+DEFAULT_FALLBACK_REPORT_PATH = DEFAULT_FALLBACK_REPORT or str(
+    PROJECT_ROOT / "data" / "reports" / "submission_fallback_report.md"
+)
+DEFAULT_FALLBACK_JSON_PATH = DEFAULT_FALLBACK_JSON or str(
+    PROJECT_ROOT / "data" / "reports" / "submission_fallback.json"
 )
 DEFAULT_VC_PROGRAM_REPORT_PATH = os.environ.get(
     "VC_PROGRAM_REPORT_PATH",
@@ -413,6 +424,27 @@ def build_parser() -> argparse.ArgumentParser:
     scan_failures.add_argument("--status", default="pending", choices=["pending", "resolved", "all"])
     scan_failures.add_argument("--limit", type=int, default=80)
     scan_failures.set_defaults(func=scan_failures_command)
+
+    submission_fallback = sub.add_parser("submission-fallback", help="Retry failed submission scans with search/AI fallback")
+    submission_fallback.add_argument("--limit", type=int, default=20)
+    submission_fallback.add_argument("--seed-urls", default="", help="Optional comma-separated URLs instead of pending failures")
+    submission_fallback.add_argument("--ai-provider", default=DEFAULT_FALLBACK_PROVIDER, choices=["auto", "groq", "gemini", "huggingface", "openrouter"])
+    submission_fallback.add_argument("--model", default="", help="Optional override model")
+    submission_fallback.add_argument("--max-results-per-query", type=int, default=6)
+    submission_fallback.add_argument("--max-candidates", type=int, default=12)
+    submission_fallback.add_argument("--max-candidate-scan", type=int, default=4)
+    submission_fallback.add_argument("--max-pages-per-site", type=int, default=6)
+    submission_fallback.add_argument("--http-timeout", type=int, default=10)
+    submission_fallback.add_argument("--status-filter", default="")
+    submission_fallback.add_argument("--org-type-filter", default="")
+    submission_fallback.add_argument("--min-score", type=int, default=0)
+    submission_fallback.add_argument("--report-limit", type=int, default=120)
+    submission_fallback.add_argument("--event-limit", type=int, default=30)
+    submission_fallback.add_argument("--output", default=DEFAULT_FALLBACK_REPORT_PATH)
+    submission_fallback.add_argument("--json-output", default=DEFAULT_FALLBACK_JSON_PATH)
+    submission_fallback.add_argument("--refresh-submission-report", default=DEFAULT_SUBMISSION_REPORT_PATH)
+    submission_fallback.add_argument("--refresh-submission-json", default=DEFAULT_SUBMISSION_JSON_PATH)
+    submission_fallback.set_defaults(func=submission_fallback_command)
 
     review_queue = sub.add_parser("review-queue", help="List items that need manual review")
     review_queue.add_argument("--limit", type=int, default=40)
