@@ -197,7 +197,16 @@ def _format_task_line(idx: int, row: sqlite3.Row) -> str:
 
 def build_ops_digest(db_path: Path, report_path: Path, *, mode: str = "morning") -> str:
     rows = _load_ops_rows(db_path)
-    if not rows:
+    submission_json = ROOT / "data" / "reports" / "submission_targets.json"
+    submission_items = _sort_submission_items(load_submission_items(submission_json))
+    apply_now_items = [
+        item
+        for item in submission_items
+        if str(item.get("status", "")).lower() in {"open", "rolling"} and int(item.get("score", 0) or 0) >= 9
+    ]
+    speedrun_items = [item for item in submission_items if _is_speedrun_submission(item)]
+
+    if not rows and not submission_items:
         if not report_path.exists():
             return f"(missing) {report_path}"
         return "[VC OPS]\n" + read_excerpt(report_path, max_lines=50, max_chars=2200)
@@ -209,7 +218,12 @@ def build_ops_digest(db_path: Path, report_path: Path, *, mode: str = "morning")
     speedrun_rows = [row for row in rows if int(row["is_speedrun"] or 0)]
 
     title = "[VC OPS EVENING]" if mode == "evening" else "[VC OPS MORNING]"
-    out = [title, f"- generated: {now_utc_iso()}", f"- active rows: {len(rows)}"]
+    out = [
+        title,
+        f"- generated: {now_utc_iso()}",
+        f"- active outreach rows: {len(rows)}",
+        f"- apply targets: {len(submission_items)}",
+    ]
 
     if mode == "evening":
         out.extend(["", "today changes:"])
@@ -228,6 +242,13 @@ def build_ops_digest(db_path: Path, report_path: Path, *, mode: str = "morning")
         else:
             out.append("- none")
 
+        out.extend(["", "apply now:"])
+        if apply_now_items:
+            for idx, item in enumerate(apply_now_items[:5], start=1):
+                out.append(_format_submission_item(idx, item))
+        else:
+            out.append("- none")
+
         out.extend(["", "watchlist later:"])
         for idx, row in enumerate(by_bucket.get("this_week", [])[:5], start=1):
             out.append(_format_task_line(idx, row))
@@ -238,14 +259,20 @@ def build_ops_digest(db_path: Path, report_path: Path, *, mode: str = "morning")
     sections = [
         ("today", by_bucket.get("today", []) + by_bucket.get("overdue", []), 5),
         ("this week", by_bucket.get("this_week", []), 6),
-        ("new speedrun / cohort", speedrun_rows, 5),
+        ("apply now", apply_now_items, 6),
+        ("new speedrun / cohort", speedrun_items if speedrun_items else speedrun_rows, 5),
         ("no deadline / outreach", by_bucket.get("no_deadline", []), 6),
     ]
     for title_text, section_rows, limit in sections:
         out.extend(["", f"{title_text}:"])
         if section_rows:
-            for idx, row in enumerate(section_rows[:limit], start=1):
-                out.append(_format_task_line(idx, row))
+            first = section_rows[0]
+            if isinstance(first, sqlite3.Row):
+                for idx, row in enumerate(section_rows[:limit], start=1):
+                    out.append(_format_task_line(idx, row))
+            else:
+                for idx, item in enumerate(section_rows[:limit], start=1):
+                    out.append(_format_submission_item(idx, item))
         else:
             out.append("- none")
     return "\n".join(out)
@@ -291,6 +318,64 @@ def parse_submission_digest(report_path: Path, json_path: Path, *, top_n: int = 
 
     # fallback
     return "[SUBMISSION DIGEST]\n" + read_excerpt(report_path, max_lines=40, max_chars=2000)
+
+
+def load_submission_items(json_path: Path) -> List[Dict[str, object]]:
+    if not json_path.exists():
+        return []
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return []
+    items = payload.get("items", [])
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _submission_status_rank(status: str) -> int:
+    s = (status or "").strip().lower()
+    if s == "open":
+        return 0
+    if s == "rolling":
+        return 1
+    if s == "deadline":
+        return 2
+    if s == "closed":
+        return 3
+    return 4
+
+
+def _sort_submission_items(items: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    return sorted(
+        items,
+        key=lambda item: (
+            _submission_status_rank(str(item.get("status", ""))),
+            -int(item.get("score", 0) or 0),
+            str(item.get("org_name", "")).lower(),
+        ),
+    )
+
+
+def _is_speedrun_submission(item: Dict[str, object]) -> bool:
+    blob = " ".join(
+        [
+            str(item.get("org_name", "")),
+            str(item.get("org_type", "")),
+            str(item.get("notes", "")),
+            str(item.get("evidence", "")),
+            str(item.get("source_page_snapshot", ""))[:400],
+        ]
+    ).lower()
+    markers = ["speedrun", "cohort", "batch", "accelerator", "apply now", "demo day"]
+    return any(marker in blob for marker in markers)
+
+
+def _format_submission_item(idx: int, item: Dict[str, object]) -> str:
+    return (
+        f"{idx}. {item.get('org_name')} | {item.get('status')} | "
+        f"score={item.get('score')} | {item.get('org_type')} | {item.get('submission_url')}"
+    )
 
 
 def parse_program_digest(path: Path, *, max_lines: int = 26) -> str:
@@ -417,12 +502,14 @@ def main() -> int:
     submission_json = Path(args.submission_json).expanduser()
     sections: List[str] = [build_ops_digest(db_path, ops_path, mode=args.mode)]
 
-    if os.environ.get("VC_OPS_INCLUDE_SUBMISSION_REPORT", "1").strip() != "0":
+    if os.environ.get("VC_OPS_INCLUDE_SUBMISSION_REPORT", "0").strip() != "0":
         sections.append(parse_submission_digest(submission_path, submission_json, top_n=args.submission_top_n))
 
     for program in programs[:10]:
         slug = program_slug(program)
         path = program_dir / f"{slug}_submission_report.md"
+        if not path.exists():
+            continue
         excerpt = parse_program_digest(path, max_lines=26)
         sections.append(f"[PROGRAM: {program}]\n{excerpt}")
 

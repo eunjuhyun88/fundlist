@@ -6,6 +6,7 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOG_DIR="$REPO_DIR/.context"
 LOG_FILE="$LOG_DIR/vc_ops.log"
 ENV_FILE="$REPO_DIR/.context/telegram.env"
+DIGEST_MODE="${1:-${VC_OPS_PUSH_MODE:-morning}}"
 
 mkdir -p "$LOG_DIR"
 cd "$REPO_DIR"
@@ -67,5 +68,7 @@ fi
 
 
 if [[ "${VC_OPS_PUSH_TELEGRAM:-1}" != "0" ]]; then
-  /usr/bin/python3 "$REPO_DIR/scripts/push_telegram_reports.py"     >> "$LOG_FILE" 2>&1 || true
+  /usr/bin/python3 "$REPO_DIR/scripts/push_telegram_reports.py" \
+    --mode "$DIGEST_MODE" \
+    >> "$LOG_FILE" 2>&1 || true
 fi

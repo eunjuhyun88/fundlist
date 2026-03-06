@@ -599,6 +599,7 @@ def handle_command(
                     "/openclaw_dry <query>",
                     "/openclaw_run <query>",
                     "/ops_sync",
+                    "/ops_daily [morning|evening]",
                     "/ops_report",
                     "/ops_list [days]",
                     "/ops_today",
@@ -729,6 +730,15 @@ def handle_command(
         ]
         code, out = run_local_command(run_cmd, timeout_sec=900)
         client.send_message(chat_id, format_command_result("ops-sync", code, out))
+        return
+
+    if cmd == "/ops_daily":
+        mode = "morning"
+        if arg and arg.strip().lower() in {"morning", "evening"}:
+            mode = arg.strip().lower()
+        run_cmd = ["/bin/zsh", str(ROOT / "scripts" / "vc_ops_cron.sh"), mode]
+        code, out = run_local_command(run_cmd, timeout_sec=1800)
+        client.send_message(chat_id, format_command_result("ops-daily", code, out, max_lines=60))
         return
 
     if cmd == "/ops_report":

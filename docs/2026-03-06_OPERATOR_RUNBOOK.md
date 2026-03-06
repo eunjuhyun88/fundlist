@@ -116,6 +116,14 @@ python3 fundlist.py submission-list --limit 40 --min-score 8
 python3 scripts/push_telegram_reports.py --mode morning
 ```
 
+현재 morning digest는 아래 4개 축을 같이 보여준다.
+
+1. `today`
+2. `this week`
+3. `apply now`
+4. `new speedrun / cohort`
+5. `no deadline / outreach`
+
 ### evening digest
 
 ```bash
@@ -132,6 +140,8 @@ python3 scripts/push_telegram_reports.py --mode morning --dry-run
 
 현재 바로 쓰는 명령:
 
+- `/ops_daily`
+- `/ops_daily evening`
 - `/ops_sync`
 - `/ops_report`
 - `/ops_list 21`
@@ -151,14 +161,19 @@ python3 scripts/push_telegram_reports.py --mode morning --dry-run
 - `/submission_*`
   - 실제 apply form / cohort / speedrun discovery
 
+`/ops_daily`는 아래를 한 번에 실행하는 운영용 명령이다.
+
+1. `ops-sync`
+2. watched program report 갱신
+3. `submission-scan`
+4. telegram push
+
 ## 실제 일일 루틴
 
 ### Morning
 
 ```bash
-python3 fundlist.py ops-sync
-python3 fundlist.py ops-list --bucket no_deadline --limit 20
-python3 scripts/push_telegram_reports.py --mode morning
+python3 scripts/vc_ops_cron.sh morning
 ```
 
 ### Midday
@@ -171,7 +186,7 @@ python3 fundlist.py submission-report --limit 50 --min-score 8
 ### Evening
 
 ```bash
-python3 scripts/push_telegram_reports.py --mode evening
+python3 scripts/vc_ops_cron.sh evening
 ```
 
 ## 중요한 해석 기준
