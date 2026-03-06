@@ -632,3 +632,5 @@ API로 팔려면 SKU를 분리하는 게 맞다.
 
 지금 `fundlist`는 그중 `verification engine + operator workflow`까지는 이미 들어와 있다.
 다음 제품화 단계는 `workspace profile`, `priority engine`, `REST API`, `async worker`다.
+
+세부 API/데이터 모델/잡 설계는 [2026-03-07_VC_AGENT_API_DETAILED_SPEC.md](./2026-03-07_VC_AGENT_API_DETAILED_SPEC.md)에 정리한다.
