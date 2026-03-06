@@ -21,6 +21,7 @@ from .store import ensure_parent_dir
 PREFERRED_XLSX_GLOBS = [
     "/Users/ej/Downloads/2025-2026 Fund Raising*.xlsx",
     "/Users/ej/Downloads/문서/VC_Fundraising/2025-2026 Fund Raising*.xlsx",
+    "/Users/ej/Downloads/보관함/By_Name/2025_2026_fund_raising/2025-2026 Fund Raising*.xlsx",
 ]
 
 LEGACY_FUNDRAISE_FILE_CANDIDATES = [
