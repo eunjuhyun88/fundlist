@@ -1360,3 +1360,5 @@ override도 별도 observation처럼 저장한다.
 정확한 제품 정의는 이렇다.
 
 `VC/Accelerator/Grant opportunity를 공식 페이지 기준으로 지속적으로 검증하고, 고객별 전략에 맞게 우선순위를 계산하며, 실제 제출 운영 상태까지 API와 push channel로 관리하는 operating system`
+
+실제 구현 순서와 자동화 경계는 [2026-03-07_AUTOMATION_SCOPE_AND_ROADMAP.md](./2026-03-07_AUTOMATION_SCOPE_AND_ROADMAP.md)에 정리한다.
