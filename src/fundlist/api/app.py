@@ -249,6 +249,9 @@ class FundlistAPIHandler(BaseHTTPRequestHandler):
         try:
             parts, _query = self._parse_request()
             body = self._read_json_body()
+            if len(parts) == 3 and parts[:2] == ["v1", "opportunities"]:
+                self._handle_patch_opportunity(parts[2], body)
+                return
             if len(parts) == 3 and parts[:2] == ["v1", "tasks"]:
                 self._handle_patch_task(parts[2], body)
                 return
@@ -280,6 +283,34 @@ class FundlistAPIHandler(BaseHTTPRequestHandler):
         store = self._submission_store()
         try:
             row = store.get_target(fingerprint)
+            if row is None:
+                self._write_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "opportunity_not_found"})
+                return
+            self._write_json(HTTPStatus.OK, {"ok": True, "item": _row_to_dict(row)})
+        finally:
+            store.close()
+
+    def _handle_patch_opportunity(self, fingerprint: str, body: Dict[str, Any]) -> None:
+        score: Optional[int] = None
+        if "score" in body and body.get("score") is not None:
+            score = _parse_int(body.get("score"), default=0, minimum=0, maximum=1000)
+        store = self._submission_store()
+        try:
+            row = store.override_target(
+                fingerprint,
+                org_name=body.get("org_name"),
+                org_type=body.get("org_type"),
+                source_url=body.get("source_url"),
+                submission_url=body.get("submission_url"),
+                submission_type=body.get("submission_type"),
+                status=body.get("status"),
+                requirements=body.get("requirements"),
+                notes=body.get("notes"),
+                evidence=body.get("evidence"),
+                deadline_text=body.get("deadline_text"),
+                deadline_date=body.get("deadline_date"),
+                score=score,
+            )
             if row is None:
                 self._write_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "opportunity_not_found"})
                 return

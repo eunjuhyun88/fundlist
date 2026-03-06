@@ -107,6 +107,32 @@ paths:
                 $ref: '#/components/schemas/OpportunityDetail'
         '404':
           $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [opportunities]
+      summary: Manually override a reviewed opportunity
+      parameters:
+        - in: path
+          name: fingerprint
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateOpportunityRequest'
+      responses:
+        '200':
+          description: Opportunity updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpportunityDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /changes:
     get:
       tags: [changes]
@@ -618,6 +644,36 @@ components:
           type: string
         recommended_action:
           type: string
+    UpdateOpportunityRequest:
+      type: object
+      properties:
+        org_name:
+          type: string
+        org_type:
+          type: string
+        source_url:
+          type: string
+        submission_url:
+          type: string
+        submission_type:
+          type: string
+        status:
+          type: string
+          enum: [open, rolling, deadline, closed, unknown]
+        requirements:
+          type: string
+        notes:
+          type: string
+        evidence:
+          type: string
+        deadline_text:
+          type: string
+        deadline_date:
+          type: string
+          format: date
+        score:
+          type: integer
+          minimum: 0
     Brief:
       type: object
       properties:

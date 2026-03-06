@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -679,6 +680,51 @@ def help_hint(bot_username: str, chat_type: str, require_mention_in_group: bool)
     return "명령은 /help, /commands, /quickstart 중 하나를 쓰면 됩니다."
 
 
+def parse_review_set_args(raw: str) -> Tuple[str, Dict[str, str], str]:
+    text = str(raw or "").strip()
+    if not text:
+        return "", {}, "usage: /review_set target:<fingerprint> key=value ..."
+    try:
+        tokens = shlex.split(text)
+    except ValueError as exc:
+        return "", {}, f"invalid arguments: {exc}"
+    if not tokens:
+        return "", {}, "usage: /review_set target:<fingerprint> key=value ..."
+
+    ref = tokens[0].strip()
+    if not ref:
+        return "", {}, "target ref is required"
+    fields: Dict[str, str] = {}
+    allowed = {
+        "org_name",
+        "org_type",
+        "source_url",
+        "submission_url",
+        "submission_type",
+        "status",
+        "requirements",
+        "notes",
+        "evidence",
+        "deadline_text",
+        "deadline_date",
+        "score",
+    }
+    for token in tokens[1:]:
+        if "=" not in token:
+            return "", {}, f"invalid token: {token} (expected key=value)"
+        key, value = token.split("=", 1)
+        key = key.strip().lower()
+        if key not in allowed:
+            return "", {}, f"unsupported field: {key}"
+        value = value.strip()
+        if value.lower() in {"clear", "none", "null"}:
+            value = ""
+        fields[key] = value
+    if not fields:
+        return "", {}, "at least one field is required"
+    return ref, fields, ""
+
+
 def build_quickstart_text() -> str:
     return "\n".join(
         [
@@ -713,6 +759,7 @@ def build_quickstart_text() -> str:
             "",
             "10. 불확실 항목 검토하기",
             "/review_queue 20",
+            "/review_set target:<fingerprint> status=closed",
             "",
             "더 자세한 설명:",
             "/help ops",
@@ -787,6 +834,8 @@ def build_help_text(
                     "  failure 항목을 수동 resolved 처리",
                     "/review_ignore <failure:id>",
                     "  failure 항목을 ignore 처리",
+                    "/review_set <target:fingerprint> key=value ...",
+                    "  target 항목 status/url/deadline 수동 보정",
                     "/apply_open [limit]",
                     "  지금 제출 가능한 항목",
                     "/apply_deadline [limit]",
@@ -867,10 +916,12 @@ def build_help_text(
                     "   검색 + AI fallback으로 대체 링크 복구",
                     "7. /review_queue 20",
                     "   실패 + unknown 항목 검토",
-                    "8. /review_ignore failure:123",
+                    "8. /review_set target:<fingerprint> status=deadline deadline_date=2026-03-25 submission_url=https://alliance.xyz/apply",
+                    "   target 항목 수동 보정",
+                    "9. /review_ignore failure:123",
                     "   잘못된 failure 항목 숨기기",
-                    "9. 이상한 항목은 공식 링크 직접 열어 확인",
-                    "10. 맞는 항목은 /task_create <query>",
+                    "10. 이상한 항목은 공식 링크 직접 열어 확인",
+                    "11. 맞는 항목은 /task_create <query>",
                     "",
                     "이상 징후 예:",
                     "- closed 인데 open 으로 보임",
@@ -881,6 +932,7 @@ def build_help_text(
                     "관련 명령:",
                     "/changes_recent 7",
                     "/review_queue 20",
+                    "/review_set target:<fingerprint> status=open",
                     "/review_ignore failure:123",
                     "/submission_list 30",
                     "/task_view <task-id>",
@@ -927,6 +979,7 @@ def build_help_text(
                 "/review_queue [limit]",
                 "/review_resolve <failure:id>",
                 "/review_ignore <failure:id>",
+                "/review_set <target:fingerprint> key=value ...",
                 "/apply_open [limit]",
                 "/apply_deadline [limit]",
                 "/apply_closed [limit]",
@@ -1340,6 +1393,37 @@ def handle_command(
         run_cmd = fundlist + ["review-queue", "--limit", limit]
         code, out = run_local_command(run_cmd, timeout_sec=60)
         client.send_message(chat_id, format_command_result("review-queue", code, out, max_lines=45))
+        return
+
+    if cmd == "/review_set":
+        ref, fields, error = parse_review_set_args(arg)
+        if error:
+            client.send_message(
+                chat_id,
+                "\n".join(
+                    [
+                        error,
+                        "",
+                        "example:",
+                        '/review_set target:abc123 status=deadline deadline_date=2026-03-25 submission_url=https://alliance.xyz/apply',
+                    ]
+                ),
+            )
+            return
+        if not ref.startswith("target:"):
+            client.send_message(chat_id, "usage: /review_set target:<fingerprint> key=value ...")
+            return
+        run_cmd = fundlist + ["target-override", ref]
+        for key, value in fields.items():
+            if key == "score":
+                if not re.fullmatch(r"-?\\d+", value or ""):
+                    client.send_message(chat_id, "score must be an integer")
+                    return
+                run_cmd.extend(["--score", value])
+                continue
+            run_cmd.extend([f"--{key.replace('_', '-')}", value])
+        code, out = run_local_command(run_cmd, timeout_sec=60)
+        client.send_message(chat_id, format_command_result("target-override", code, out, max_lines=20))
         return
 
     if cmd in {"/review_resolve", "/review_ignore"}:

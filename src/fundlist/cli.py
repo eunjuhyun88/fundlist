@@ -26,6 +26,7 @@ from .submission_finder import (
     submission_list_command,
     submission_report_command,
     submission_scan_command,
+    target_override_command,
 )
 from .submission_tasks import (
     task_add_note_command,
@@ -434,6 +435,22 @@ def build_parser() -> argparse.ArgumentParser:
     scan_failure_ignore = sub.add_parser("scan-failure-ignore", help="Ignore a scan failure")
     scan_failure_ignore.add_argument("ref", help="failure:<id>, raw id, or seed URL")
     scan_failure_ignore.set_defaults(func=scan_failure_ignore_command)
+
+    target_override = sub.add_parser("target-override", help="Manually override a reviewed submission target")
+    target_override.add_argument("ref", help="target:<fingerprint>, unique fingerprint prefix, or raw fingerprint")
+    target_override.add_argument("--org-name", default=None)
+    target_override.add_argument("--org-type", default=None)
+    target_override.add_argument("--source-url", default=None)
+    target_override.add_argument("--submission-url", default=None)
+    target_override.add_argument("--submission-type", default=None)
+    target_override.add_argument("--status", default=None)
+    target_override.add_argument("--requirements", default=None)
+    target_override.add_argument("--notes", default=None)
+    target_override.add_argument("--evidence", default=None)
+    target_override.add_argument("--deadline-text", default=None)
+    target_override.add_argument("--deadline-date", default=None)
+    target_override.add_argument("--score", type=int, default=None)
+    target_override.set_defaults(func=target_override_command)
 
     submission_fallback = sub.add_parser("submission-fallback", help="Retry failed submission scans with search/AI fallback")
     submission_fallback.add_argument("--limit", type=int, default=20)

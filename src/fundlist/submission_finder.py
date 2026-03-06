@@ -977,6 +977,93 @@ class SubmissionStore:
         )
         return cur.fetchone()
 
+    def resolve_target_ref(self, ref: str) -> Optional[sqlite3.Row]:
+        raw_ref = str(ref or "").strip()
+        if raw_ref.startswith("target:"):
+            raw_ref = raw_ref.split(":", 1)[1].strip()
+        if not raw_ref:
+            return None
+
+        current = self.get_target(raw_ref)
+        if current is not None:
+            return current
+
+        if len(raw_ref) < 8:
+            return None
+        self.conn.row_factory = sqlite3.Row
+        cur = self.conn.execute(
+            """
+            SELECT id, org_name, org_type, domain, source_url, submission_url, submission_type,
+                   fingerprint, status, requirements, notes, evidence, source_page_snapshot,
+                   deadline_text, deadline_date, score,
+                   discovered_at, last_checked_at
+            FROM submission_targets
+            WHERE fingerprint LIKE ?
+            ORDER BY last_checked_at DESC, score DESC
+            LIMIT 2
+            """,
+            (f"{raw_ref}%",),
+        )
+        rows = cur.fetchall()
+        if len(rows) != 1:
+            return None
+        return rows[0]
+
+    def override_target(
+        self,
+        ref: str,
+        *,
+        org_name: str | None = None,
+        org_type: str | None = None,
+        source_url: str | None = None,
+        submission_url: str | None = None,
+        submission_type: str | None = None,
+        status: str | None = None,
+        requirements: str | None = None,
+        notes: str | None = None,
+        evidence: str | None = None,
+        deadline_text: str | None = None,
+        deadline_date: str | None = None,
+        score: int | None = None,
+    ) -> Optional[sqlite3.Row]:
+        current = self.resolve_target_ref(ref)
+        if current is None:
+            return None
+
+        merged_source_url = _canonicalize_url(str(source_url).strip()) if source_url is not None and str(source_url).strip() else str(current["source_url"] or "")
+        merged_submission_url = _canonicalize_url(str(submission_url).strip()) if submission_url is not None and str(submission_url).strip() else str(current["submission_url"] or "")
+        merged_domain = _domain_key(merged_submission_url or merged_source_url or str(current["source_url"] or ""))
+        merged_notes = str(current["notes"] or "")
+        if notes is not None:
+            merged_notes = sanitize(str(notes), limit=600)
+        merged_evidence = str(current["evidence"] or "")
+        if evidence is not None:
+            merged_evidence = sanitize(str(evidence), limit=600)
+        elif "manual-override" not in merged_evidence:
+            merged_evidence = sanitize((merged_evidence + " | manual-override").strip(" |"), limit=600)
+
+        target = SubmissionTarget(
+            org_name=sanitize(str(org_name if org_name is not None else current["org_name"]), limit=120),
+            org_type=sanitize(str(org_type if org_type is not None else current["org_type"]), limit=80),
+            domain=merged_domain or str(current["domain"] or ""),
+            source_url=merged_source_url or str(current["source_url"] or ""),
+            submission_url=merged_submission_url or str(current["submission_url"] or ""),
+            submission_type=sanitize(str(submission_type if submission_type is not None else current["submission_type"]), limit=40),
+            status=sanitize(str(status if status is not None else current["status"]), limit=40),
+            requirements=sanitize(str(requirements if requirements is not None else current["requirements"]), limit=600),
+            notes=merged_notes,
+            evidence=merged_evidence,
+            source_page_snapshot=sanitize(str(current["source_page_snapshot"] or ""), limit=1000),
+            deadline_text=sanitize(str(deadline_text if deadline_text is not None else current["deadline_text"]), limit=240),
+            deadline_date=sanitize(str(deadline_date if deadline_date is not None else current["deadline_date"]), limit=40),
+            score=int(score if score is not None else int(current["score"] or 0)),
+        )
+        self.upsert_targets([target])
+        row = self.get_target(target.fingerprint)
+        if row is not None:
+            return row
+        return self.get_target(str(current["fingerprint"] or ""))
+
     def list_events(self, *, limit: int = 40) -> List[sqlite3.Row]:
         self.conn.row_factory = sqlite3.Row
         cur = self.conn.execute(
@@ -2827,4 +2914,39 @@ def scan_failure_ignore_command(args: argparse.Namespace) -> int:
     store = SubmissionStore(args.db)
     changed = store.set_scan_failure_status(args.ref, status="ignored", changed_at=now_utc_iso())
     print(f"[done] ignored={changed} ref={args.ref}")
+    return 0
+
+
+def target_override_command(args: argparse.Namespace) -> int:
+    store = SubmissionStore(args.db)
+    row = store.override_target(
+        args.ref,
+        org_name=args.org_name,
+        org_type=args.org_type,
+        source_url=args.source_url,
+        submission_url=args.submission_url,
+        submission_type=args.submission_type,
+        status=args.status,
+        requirements=args.requirements,
+        notes=args.notes,
+        evidence=args.evidence,
+        deadline_text=args.deadline_text,
+        deadline_date=args.deadline_date,
+        score=args.score,
+    )
+    if row is None:
+        print(f"[error] target not found: {args.ref}")
+        return 2
+    print(
+        "\t".join(
+            [
+                str(row["fingerprint"]),
+                str(row["org_name"]),
+                str(row["status"]),
+                str(row["submission_type"]),
+                str(row["deadline_date"] or row["deadline_text"]),
+                str(row["submission_url"]),
+            ]
+        )
+    )
     return 0
