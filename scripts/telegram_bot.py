@@ -706,6 +706,9 @@ def build_quickstart_text() -> str:
             "/scan_failures 20",
             "/retry_failed 50",
             "",
+            "9. 불확실 항목 검토하기",
+            "/review_queue 20",
+            "",
             "더 자세한 설명:",
             "/help ops",
             "/help apply",
@@ -771,6 +774,8 @@ def build_help_text(
                     "  unresolved scan failure 목록",
                     "/retry_failed [limit]",
                     "  실패한 seed만 재시도",
+                    "/review_queue [limit]",
+                    "  실패 항목 + 불확실 target 검토 큐",
                     "/apply_open [limit]",
                     "  지금 제출 가능한 항목",
                     "/apply_deadline [limit]",
@@ -847,8 +852,10 @@ def build_help_text(
                     "   중단/예외 난 seed 확인",
                     "5. /retry_failed 50",
                     "   실패 seed만 다시 스캔",
-                    "6. 이상한 항목은 공식 링크 직접 열어 확인",
-                    "7. 맞는 항목은 /task_create <query>",
+                    "6. /review_queue 20",
+                    "   실패 + unknown 항목 검토",
+                    "7. 이상한 항목은 공식 링크 직접 열어 확인",
+                    "8. 맞는 항목은 /task_create <query>",
                     "",
                     "이상 징후 예:",
                     "- closed 인데 open 으로 보임",
@@ -858,6 +865,7 @@ def build_help_text(
                     "",
                     "관련 명령:",
                     "/changes_recent 7",
+                    "/review_queue 20",
                     "/submission_list 30",
                     "/task_view <task-id>",
                 ]
@@ -899,6 +907,7 @@ def build_help_text(
                 "/submission_scan [full|query]",
                 "/scan_failures [limit]",
                 "/retry_failed [limit]",
+                "/review_queue [limit]",
                 "/apply_open [limit]",
                 "/apply_deadline [limit]",
                 "/apply_closed [limit]",
@@ -1281,6 +1290,15 @@ def handle_command(
         code, out = run_local_command(run_cmd, timeout_sec=1200)
         msg = [format_command_result("retry-failed", code, out, max_lines=50), "", read_report(DEFAULT_SUBMISSION_REPORT)]
         client.send_message(chat_id, "\n".join(msg))
+        return
+
+    if cmd == "/review_queue":
+        limit = "20"
+        if arg and arg.strip().isdigit():
+            limit = str(max(1, min(100, int(arg.strip()))))
+        run_cmd = fundlist + ["review-queue", "--limit", limit]
+        code, out = run_local_command(run_cmd, timeout_sec=60)
+        client.send_message(chat_id, format_command_result("review-queue", code, out, max_lines=45))
         return
 
     if cmd == "/submission_list":

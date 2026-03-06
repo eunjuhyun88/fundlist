@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..changefeed import _since_iso
+from ..review_queue import list_review_queue
 from ..submission_finder import SubmissionStore
 from ..submission_tasks import SubmissionTaskStore
 
@@ -202,6 +203,9 @@ class FundlistAPIHandler(BaseHTTPRequestHandler):
             if parts == ["v1", "changes"]:
                 self._handle_list_changes(query)
                 return
+            if parts == ["v1", "review-queue"]:
+                self._handle_review_queue(query)
+                return
             if parts == ["v1", "tasks"]:
                 self._handle_list_tasks(query)
                 return
@@ -296,6 +300,22 @@ class FundlistAPIHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "count": len(rows),
                     "items": [_row_to_dict(row) for row in rows],
+                },
+            )
+        finally:
+            store.close()
+
+    def _handle_review_queue(self, query: Dict[str, List[str]]) -> None:
+        store = self._submission_store()
+        try:
+            limit = _parse_int((query.get("limit") or ["40"])[0], default=40, minimum=1, maximum=200)
+            rows = list_review_queue(store, limit=limit)
+            self._write_json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "items": rows,
+                    "count": len(rows),
                 },
             )
         finally:

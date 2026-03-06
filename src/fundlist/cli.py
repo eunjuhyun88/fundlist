@@ -16,6 +16,7 @@ from .fundraising import (
     fundraise_run_command,
 )
 from .openclaw import openclaw_multi_command
+from .review_queue import review_queue_command
 from .submission_finder import (
     scan_failures_command,
     submission_export_command,
@@ -412,6 +413,10 @@ def build_parser() -> argparse.ArgumentParser:
     scan_failures.add_argument("--status", default="pending", choices=["pending", "resolved", "all"])
     scan_failures.add_argument("--limit", type=int, default=80)
     scan_failures.set_defaults(func=scan_failures_command)
+
+    review_queue = sub.add_parser("review-queue", help="List items that need manual review")
+    review_queue.add_argument("--limit", type=int, default=40)
+    review_queue.set_defaults(func=review_queue_command)
 
     changes_list = sub.add_parser("changes-list", help="List structured opportunity changes")
     changes_list.add_argument(
