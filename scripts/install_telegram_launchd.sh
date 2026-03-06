@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUN_DIR="$HOME/.fundlist_bot_runtime"
 LABEL="com.fundlist.telegrambot"
+DOMAIN="gui/$(id -u)"
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST_PATH="$PLIST_DIR/$LABEL.plist"
 OUT_LOG="$RUN_DIR/.context/telegram_stdout.log"
@@ -45,10 +46,17 @@ cat > "$PLIST_PATH" <<EOF
 </plist>
 EOF
 
-launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
-launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
-launchctl enable "gui/$(id -u)/$LABEL"
-launchctl kickstart -k "gui/$(id -u)/$LABEL"
+launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+for _ in {1..10}; do
+  if ! launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+launchctl bootstrap "$DOMAIN" "$PLIST_PATH"
+launchctl enable "$DOMAIN/$LABEL"
+launchctl kickstart -k "$DOMAIN/$LABEL"
 
 echo "installed: $PLIST_PATH"
-launchctl print "gui/$(id -u)/$LABEL" | sed -n '1,40p'
+launchctl print "$DOMAIN/$LABEL" | sed -n '1,40p'

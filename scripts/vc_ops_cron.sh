@@ -13,9 +13,7 @@ mkdir -p "$LOG_DIR"
 cd "$REPO_DIR"
 
 if [[ -f "$ENV_FILE" ]]; then
-  set -a
-  source "$ENV_FILE"
-  set +a
+  eval "$(/usr/bin/python3 "$REPO_DIR/scripts/load_env_exports.py" "$ENV_FILE")"
 fi
 
 /usr/bin/python3 "$REPO_DIR/fundlist.py" ops-sync \

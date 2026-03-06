@@ -7,9 +7,7 @@ cd "$REPO_DIR"
 
 ENV_FILE="$REPO_DIR/.context/telegram.env"
 if [[ -f "$ENV_FILE" ]]; then
-  set -a
-  source "$ENV_FILE"
-  set +a
+  eval "$(/usr/bin/python3 "$REPO_DIR/scripts/load_env_exports.py" "$ENV_FILE")"
 fi
 
 if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then

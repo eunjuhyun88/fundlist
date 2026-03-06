@@ -18,16 +18,30 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from .store import ensure_parent_dir
 
 
-FUNDRAISE_FILE_CANDIDATES = [
-    "/Users/ej/Downloads/문서/VC_Fundraising/2025-2026 Fund Raising.xlsx",
+PREFERRED_XLSX_GLOBS = [
+    "/Users/ej/Downloads/2025-2026 Fund Raising*.xlsx",
+    "/Users/ej/Downloads/문서/VC_Fundraising/2025-2026 Fund Raising*.xlsx",
+]
+
+LEGACY_FUNDRAISE_FILE_CANDIDATES = [
     "/Users/ej/Downloads/2025-2026 Fund Raising - Web2 VC.csv",
     "/Users/ej/Downloads/2025-2026 Fund Raising - Web3 VC.csv",
     "/Users/ej/Downloads/2025-2026 Fund Raising - grants program.csv",
     "/Users/ej/Downloads/2025-2026 Fund Raising - Accelerator Program.csv",
     "/Users/ej/Downloads/2025-2026 Fund Raising - contact.csv",
     "/Users/ej/Downloads/2025-2026 Fund Raising - Email From Pitchdeck.tsv",
-    "/Users/ej/Downloads/2025-2026 Fund Raising.xlsx",
 ]
+
+
+def _latest_matching_workbook() -> List[str]:
+    matches: List[Path] = []
+    for pattern in PREFERRED_XLSX_GLOBS:
+        matches.extend(Path("/").glob(pattern.lstrip("/")))
+    unique = sorted({p.resolve() for p in matches if p.exists()}, key=lambda p: p.stat().st_mtime, reverse=True)
+    return [str(unique[0])] if unique else []
+
+
+FUNDRAISE_FILE_CANDIDATES = _latest_matching_workbook() + LEGACY_FUNDRAISE_FILE_CANDIDATES
 
 
 def _existing_default_fundraise_files() -> List[str]:

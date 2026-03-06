@@ -9,7 +9,7 @@ import urllib.parse
 import urllib.request
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from html import unescape
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -124,6 +124,12 @@ CLOSED_MARKERS = [
     "closed for applications",
     "currently closed",
     "no longer accepting",
+    "no longer accepting responses",
+    "this form is no longer accepting responses",
+    "submissions closed",
+    "applications are now closed",
+    "더 이상 응답을 받지 않습니다",
+    "신청이 마감되었습니다",
 ]
 ROLLING_MARKERS = [
     "rolling basis",
@@ -132,6 +138,47 @@ ROLLING_MARKERS = [
     "always open",
     "open applications",
 ]
+DEADLINE_MARKERS = [
+    "deadline",
+    "apply by",
+    "applications due",
+    "application due",
+    "submissions due",
+    "submission due",
+    "closes on",
+    "applications close",
+    "cohort starts",
+    "batch starts",
+    "마감",
+    "지원 마감",
+    "신청 마감",
+]
+MONTH_NAME_TO_NUMBER = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
 INTRO_ONLY_MARKERS = [
     "warm intro",
     "by referral",
@@ -288,6 +335,8 @@ class SubmissionTarget:
     notes: str
     evidence: str
     source_page_snapshot: str
+    deadline_text: str
+    deadline_date: str
     score: int
 
     @property
@@ -320,6 +369,8 @@ class SubmissionStore:
               notes TEXT NOT NULL,
               evidence TEXT NOT NULL,
               source_page_snapshot TEXT NOT NULL DEFAULT '',
+              deadline_text TEXT NOT NULL DEFAULT '',
+              deadline_date TEXT NOT NULL DEFAULT '',
               score INTEGER NOT NULL,
               discovered_at TEXT NOT NULL,
               last_checked_at TEXT NOT NULL
@@ -327,6 +378,8 @@ class SubmissionStore:
             """
         )
         self._ensure_column("submission_targets", "source_page_snapshot", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("submission_targets", "deadline_text", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("submission_targets", "deadline_date", "TEXT NOT NULL DEFAULT ''")
 
         self.conn.execute(
             """
@@ -370,6 +423,8 @@ class SubmissionStore:
             "notes": row["notes"],
             "evidence": row["evidence"],
             "source_page_snapshot": row["source_page_snapshot"],
+            "deadline_text": row["deadline_text"],
+            "deadline_date": row["deadline_date"],
             "score": row["score"],
         }
 
@@ -384,6 +439,8 @@ class SubmissionStore:
             "notes": target.notes,
             "evidence": target.evidence,
             "source_page_snapshot": target.source_page_snapshot,
+            "deadline_text": target.deadline_text,
+            "deadline_date": target.deadline_date,
             "score": target.score,
         }
 
@@ -422,8 +479,8 @@ class SubmissionStore:
             INSERT INTO submission_targets (
               fingerprint, org_name, org_type, domain, source_url, submission_url,
               submission_type, status, requirements, notes, evidence, source_page_snapshot,
-              score, discovered_at, last_checked_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              deadline_text, deadline_date, score, discovered_at, last_checked_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(fingerprint) DO UPDATE SET
               org_name=excluded.org_name,
               org_type=excluded.org_type,
@@ -434,6 +491,8 @@ class SubmissionStore:
               notes=excluded.notes,
               evidence=excluded.evidence,
               source_page_snapshot=excluded.source_page_snapshot,
+              deadline_text=excluded.deadline_text,
+              deadline_date=excluded.deadline_date,
               score=excluded.score,
               last_checked_at=excluded.last_checked_at
         """
@@ -441,7 +500,7 @@ class SubmissionStore:
         with self.conn:
             for target in targets:
                 cur = self.conn.execute(
-                    "SELECT org_name, org_type, submission_url, submission_type, status, requirements, notes, evidence, source_page_snapshot, score FROM submission_targets WHERE fingerprint = ?",
+                    "SELECT org_name, org_type, submission_url, submission_type, status, requirements, notes, evidence, source_page_snapshot, deadline_text, deadline_date, score FROM submission_targets WHERE fingerprint = ?",
                     (target.fingerprint,),
                 )
                 old_row = cur.fetchone()
@@ -475,6 +534,8 @@ class SubmissionStore:
                         target.notes,
                         target.evidence,
                         target.source_page_snapshot,
+                        target.deadline_text,
+                        target.deadline_date,
                         target.score,
                         now,
                         now,
@@ -501,7 +562,8 @@ class SubmissionStore:
             args.append(org_type)
         sql = f"""
             SELECT id, org_name, org_type, domain, source_url, submission_url, submission_type,
-                   status, requirements, notes, evidence, source_page_snapshot, score,
+                   status, requirements, notes, evidence, source_page_snapshot,
+                   deadline_text, deadline_date, score,
                    discovered_at, last_checked_at
             FROM submission_targets
             WHERE {' AND '.join(where)}
@@ -642,16 +704,17 @@ class SubmissionStore:
                 ),
             )
             keep: set[int] = set()
-            seen: set[Tuple[str, str]] = set()
+            seen: set[str] = set()
             root_count: Dict[str, int] = {}
             for row in ranked_rows:
-                key = (
-                    str(row["domain"]).strip().lower(),
-                    re.sub(r"^https?://", "", str(row["submission_url"]).strip().lower()),
+                submission_url = _canonicalize_url(str(row["submission_url"]).strip())
+                is_form_target = bool(
+                    submission_url and (_looks_actionable_form_url(submission_url) or _looks_form_host(submission_url))
                 )
+                key = re.sub(r"^https?://", "", str(submission_url or row["submission_url"]).strip().lower())
                 if key in seen:
                     continue
-                root = _root_domain(str(row["domain"]).strip().lower())
+                root = "" if is_form_target else _root_domain(str(row["domain"]).strip().lower())
                 if root:
                     used = root_count.get(root, 0)
                     if used >= 1:
@@ -746,6 +809,35 @@ def _normalize_seed_url(raw_url: str) -> str:
     if path_low and path_low != "/" and (not has_submission_path or _is_content_like_url(url)):
         return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/", "", ""))
     return url
+
+
+def _normalize_fundraise_seed_url(raw_url: str, *, category: str, status: str, notes: str) -> str:
+    canonical = _canonicalize_url(raw_url)
+    if not canonical:
+        return ""
+    domain = _domain_key(canonical)
+    if not _is_target_domain(domain):
+        return ""
+
+    path_low = urllib.parse.urlsplit(canonical).path.lower()
+    context = f"{category} {status} {notes} {path_low}".lower()
+    preserve_exact = (
+        any(token in context for token in ["accelerator", "grant", "cohort", "batch", "apply", "application", "submit"])
+        or _looks_actionable_form_url(canonical)
+        or _looks_form_host(canonical)
+    )
+    if preserve_exact:
+        return canonical
+    return _normalize_seed_url(canonical)
+
+
+def _seed_identity(url: str) -> str:
+    canonical = _canonicalize_url(url)
+    if not canonical:
+        return ""
+    if _looks_actionable_form_url(canonical) or _looks_form_host(canonical):
+        return canonical
+    return _domain_key(canonical)
 
 
 def _same_domain(a: str, b: str) -> bool:
@@ -919,7 +1011,7 @@ def _looks_actionable_form_url(url: str) -> bool:
     if "typeform.com" in domain:
         return "/to/" in path or "/form/" in path
     if "docs.google.com" in domain:
-        return "/forms/" in path
+        return "/forms/" in path and "/edit" not in path and "/viewanalytics" not in path
     if "forms.gle" in domain:
         return True
     if "tally.so" in domain:
@@ -1004,13 +1096,119 @@ def _pick_best_submission_url(current_url: str, html: str) -> Tuple[str, str, in
     return picked, best_note, best_score
 
 
-def _classify_status(page_text: str) -> str:
+def _safe_iso_date(year: int, month: int, day: int) -> str:
+    try:
+        return date(year, month, day).isoformat()
+    except ValueError:
+        return ""
+
+
+def _choose_best_deadline(candidates: Sequence[Tuple[str, str]], *, today: date) -> Tuple[str, str]:
+    if not candidates:
+        return "", ""
+
+    future: List[Tuple[date, str, str]] = []
+    past: List[Tuple[date, str, str]] = []
+    for iso_value, snippet in candidates:
+        try:
+            parsed = date.fromisoformat(iso_value)
+        except ValueError:
+            continue
+        target = future if parsed >= today else past
+        target.append((parsed, iso_value, snippet))
+
+    if future:
+        future.sort(key=lambda item: item[0])
+        _, iso_value, snippet = future[0]
+        return sanitize(snippet, limit=180), iso_value
+    if past:
+        past.sort(key=lambda item: item[0], reverse=True)
+        _, iso_value, snippet = past[0]
+        return sanitize(snippet, limit=180), iso_value
+    return "", ""
+
+
+def _extract_deadline(page_text: str, *, today: Optional[date] = None) -> Tuple[str, str]:
+    if not page_text:
+        return "", ""
+
+    today = today or datetime.now(timezone.utc).date()
+    text = sanitize(page_text, limit=12000)
+    text_low = text.lower()
+
+    snippets: List[str] = []
+    for marker in DEADLINE_MARKERS:
+        start = 0
+        while True:
+            idx = text_low.find(marker, start)
+            if idx < 0:
+                break
+            snippets.append(text[max(0, idx - 80) : min(len(text), idx + 180)])
+            start = idx + len(marker)
+    if not snippets:
+        snippets = [text]
+
+    candidates: List[Tuple[str, str]] = []
+
+    def add_candidate(year: int, month: int, day: int, snippet: str) -> None:
+        iso_value = _safe_iso_date(year, month, day)
+        if iso_value:
+            candidates.append((iso_value, snippet))
+
+    def inferred_year(month: int, day: int, explicit_year: str) -> int:
+        if explicit_year:
+            return int(explicit_year)
+        current_year = today.year
+        current_value = _safe_iso_date(current_year, month, day)
+        if current_value:
+            try:
+                parsed = date.fromisoformat(current_value)
+                if parsed < today and (today - parsed).days > 45:
+                    return current_year + 1
+            except ValueError:
+                pass
+        return current_year
+
+    for snippet in snippets:
+        for match in re.finditer(r"\b(20\d{2})[./-](\d{1,2})[./-](\d{1,2})\b", snippet):
+            add_candidate(int(match.group(1)), int(match.group(2)), int(match.group(3)), snippet)
+
+        for match in re.finditer(r"\b(20\d{2})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일?\b", snippet):
+            add_candidate(int(match.group(1)), int(match.group(2)), int(match.group(3)), snippet)
+
+        for match in re.finditer(
+            r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|"
+            r"sep(?:tember)?|sept(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:,?\s*(20\d{2}))?\b",
+            snippet,
+            flags=re.IGNORECASE,
+        ):
+            month = MONTH_NAME_TO_NUMBER[match.group(1).lower()]
+            day = int(match.group(2))
+            year = inferred_year(month, day, match.group(3) or "")
+            add_candidate(year, month, day, snippet)
+
+        for match in re.finditer(
+            r"\b(\d{1,2})\s+"
+            r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|"
+            r"sep(?:tember)?|sept(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:,?\s*(20\d{2}))?\b",
+            snippet,
+            flags=re.IGNORECASE,
+        ):
+            month = MONTH_NAME_TO_NUMBER[match.group(2).lower()]
+            day = int(match.group(1))
+            year = inferred_year(month, day, match.group(3) or "")
+            add_candidate(year, month, day, snippet)
+
+    return _choose_best_deadline(candidates, today=today)
+
+
+def _classify_status(page_text: str, *, deadline_text: str = "") -> str:
     text = page_text.lower()
     if any(marker in text for marker in CLOSED_MARKERS):
         return "closed"
     if any(marker in text for marker in ROLLING_MARKERS):
         return "rolling"
-    if re.search(r"\b(deadline|apply by|applications due|cohort starts?)\b", text):
+    if deadline_text or any(marker in text for marker in DEADLINE_MARKERS):
         return "deadline"
     return "open"
 
@@ -1094,6 +1292,8 @@ def _evaluate_page(url: str, source_url: str, html: str, org_hint: str) -> Optio
     embed_hits = [m for m in FORM_EMBED_MARKERS if m in html_low and _embed_marker_has_submission_context(html_low, m)]
     intro_only = any(m in text_low for m in INTRO_ONLY_MARKERS)
     pitch_emails = _extract_pitch_emails(text)
+    direct_form_url = _looks_actionable_form_url(url)
+    direct_form_host = _looks_form_host(url)
 
     # Avoid generic contact pages unless they clearly indicate pitch submission.
     if "contact" in path_low:
@@ -1118,6 +1318,12 @@ def _evaluate_page(url: str, source_url: str, html: str, org_hint: str) -> Optio
     if embed_hits:
         score += 4
         evidence.append(f"embed:{embed_hits[0]}")
+    if direct_form_url:
+        score += 6
+        evidence.append("url:direct-form")
+    elif direct_form_host:
+        score += 2
+        evidence.append("url:form-host")
     if intro_only:
         score += 1
         evidence.append("policy:intro-only")
@@ -1128,23 +1334,29 @@ def _evaluate_page(url: str, source_url: str, html: str, org_hint: str) -> Optio
     if score < 4:
         return None
 
-    intent_signal = bool(path_hits or phrase_hits or embed_hits or pitch_emails or intro_only)
+    intent_signal = bool(path_hits or phrase_hits or embed_hits or pitch_emails or intro_only or direct_form_url)
     if not intent_signal:
         return None
 
     relevance = sum(1 for marker in RELEVANCE_MARKERS if marker in text_low)
-    if relevance == 0 and not any(k in org_hint.lower() for k in ["capital", "ventures", "accelerator", "fund"]):
+    if (
+        relevance == 0
+        and not direct_form_url
+        and not direct_form_host
+        and not any(k in org_hint.lower() for k in ["capital", "ventures", "accelerator", "fund", "grant"])
+    ):
         return None
 
     submission_type = "unknown"
-    if has_form or embed_hits:
+    if has_form or embed_hits or direct_form_url:
         submission_type = "form"
     elif pitch_emails:
         submission_type = "email"
     elif intro_only:
         submission_type = "intro-only"
 
-    status = _classify_status(text)
+    deadline_text, deadline_date = _extract_deadline(text)
+    status = _classify_status(text, deadline_text=deadline_text)
     requirements = _detect_requirements(text)
     title = _title_from_html(html)
     org_name = _normalize_org_name(_infer_org_name(domain=domain, title=title, hint=org_hint), domain)
@@ -1153,6 +1365,8 @@ def _evaluate_page(url: str, source_url: str, html: str, org_hint: str) -> Optio
     notes_parts: List[str] = []
     if status == "deadline":
         notes_parts.append("deadline-like wording detected")
+    if deadline_text:
+        notes_parts.append(f"deadline: {deadline_text}")
     if intro_only:
         notes_parts.append("warm-intro/referral wording detected")
     if pitch_emails:
@@ -1160,7 +1374,12 @@ def _evaluate_page(url: str, source_url: str, html: str, org_hint: str) -> Optio
     if title:
         notes_parts.append(f"title: {title}")
 
-    submission_url, link_note, link_score = _pick_best_submission_url(url, html)
+    if direct_form_url:
+        submission_url = _canonicalize_url(url)
+        link_note = "direct-form"
+        link_score = 10
+    else:
+        submission_url, link_note, link_score = _pick_best_submission_url(url, html)
     if not submission_url:
         return None
     submission_url_low = submission_url.lower()
@@ -1216,6 +1435,8 @@ def _evaluate_page(url: str, source_url: str, html: str, org_hint: str) -> Optio
         notes=sanitize("; ".join(notes_parts), limit=500),
         evidence=sanitize(" | ".join(evidence), limit=500),
         source_page_snapshot=snapshot,
+        deadline_text=deadline_text,
+        deadline_date=deadline_date,
         score=score,
     )
 
@@ -1259,7 +1480,7 @@ def _scan_site(seed: DiscoverySeed, max_pages: int = 6, http_timeout: int = 10) 
         if page_url not in visited:
             visited.add(page_url)
 
-        candidate = _evaluate_page(url=page_url, source_url=seed.url, html=html, org_hint=seed.org_name_hint)
+        candidate = _evaluate_page(url=page_url, source_url=page_url, html=html, org_hint=seed.org_name_hint)
         if candidate and (best is None or _candidate_rank(candidate) < _candidate_rank(best)):
             best = candidate
 
@@ -1341,12 +1562,12 @@ def _load_submission_target_seeds(db_path: str, limit: int = 240) -> List[Discov
 
     ranked_rows.sort(key=lambda x: x[0], reverse=True)
     out: List[DiscoverySeed] = []
-    seen_domains: set[str] = set()
+    seen_keys: set[str] = set()
     for _, url, org_name in ranked_rows:
-        domain = _domain_key(url)
-        if not domain or domain in seen_domains:
+        key = _seed_identity(url)
+        if not key or key in seen_keys:
             continue
-        seen_domains.add(domain)
+        seen_keys.add(key)
         out.append(
             DiscoverySeed(
                 url=url,
@@ -1408,41 +1629,50 @@ def _load_fundraise_seeds(db_path: str, limit: int = 300) -> List[DiscoverySeed]
 
     ranked_rows: List[Tuple[int, str, str, str]] = []
     for website, org_name, category, status, notes in cur.fetchall():
-        seed_url = _normalize_seed_url(str(website or ""))
+        website_str = str(website or "")
+        category_str = str(category or "")
+        status_str = str(status or "")
+        notes_str = str(notes or "")
+        seed_url = _normalize_fundraise_seed_url(
+            website_str,
+            category=category_str,
+            status=status_str,
+            notes=notes_str,
+        )
         if not seed_url:
             continue
         ranked_rows.append(
             (
                 rank_seed(
-                    str(website or ""),
+                    website_str,
                     str(org_name or ""),
-                    str(category or ""),
-                    str(status or ""),
-                    str(notes or ""),
+                    category_str,
+                    status_str,
+                    notes_str,
                 ),
                 seed_url,
                 str(org_name or ""),
-                str(category or ""),
+                category_str,
             )
         )
 
-    best_by_domain: Dict[str, Tuple[int, str, str, str]] = {}
+    best_by_identity: Dict[str, Tuple[int, str, str, str]] = {}
     for row in ranked_rows:
-        domain = _domain_key(row[1])
-        if not domain:
+        key = _seed_identity(row[1])
+        if not key:
             continue
-        prev = best_by_domain.get(domain)
+        prev = best_by_identity.get(key)
         if prev is None or row[0] > prev[0]:
-            best_by_domain[domain] = row
+            best_by_identity[key] = row
 
-    ranked_rows = sorted(best_by_domain.values(), key=lambda x: x[0], reverse=True)
-    seen_domains: set[str] = set()
+    ranked_rows = sorted(best_by_identity.values(), key=lambda x: x[0], reverse=True)
+    seen_keys: set[str] = set()
     out: List[DiscoverySeed] = []
     for _, url, org_name, category in ranked_rows:
-        domain = _domain_key(url)
-        if domain in seen_domains:
+        key = _seed_identity(url)
+        if key in seen_keys:
             continue
-        seen_domains.add(domain)
+        seen_keys.add(key)
         out.append(
             DiscoverySeed(
                 url=url,
@@ -1461,11 +1691,12 @@ def _dedupe_seeds(seeds: Iterable[DiscoverySeed], *, max_sites: int) -> List[Dis
     seen: set[str] = set()
     for seed in seeds:
         domain = _domain_key(seed.url)
-        if not domain or domain in seen:
+        key = _seed_identity(seed.url)
+        if not domain or not key or key in seen:
             continue
         if not _is_target_domain(domain):
             continue
-        seen.add(domain)
+        seen.add(key)
         out.append(seed)
         if len(out) >= max_sites:
             break
@@ -1520,12 +1751,15 @@ def _rows_to_json(rows: Sequence[sqlite3.Row]) -> List[Dict[str, object]]:
                 "org_name": row["org_name"],
                 "org_type": row["org_type"],
                 "domain": row["domain"],
+                "source_url": row["source_url"],
                 "submission_url": row["submission_url"],
                 "submission_type": row["submission_type"],
                 "status": row["status"],
                 "requirements": row["requirements"],
                 "notes": row["notes"],
                 "source_page_snapshot": row["source_page_snapshot"],
+                "deadline_text": row["deadline_text"],
+                "deadline_date": row["deadline_date"],
                 "evidence": row["evidence"],
                 "score": row["score"],
                 "last_checked_at": row["last_checked_at"],
@@ -1611,19 +1845,20 @@ def _render_submission_report(rows: Sequence[sqlite3.Row], events: Sequence[sqli
     if ordered_rows:
         lines.append("## Quick Table")
         lines.append("")
-        lines.append("| # | Priority | Organization | Org Type | Submission | Status | Score | Link |")
-        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+        lines.append("| # | Priority | Organization | Org Type | Submission | Status | Deadline | Score | Link |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
         for idx, row in enumerate(ordered_rows, start=1):
             priority = _priority_for_row(row)
             org_name = sanitize(str(row["org_name"]), limit=90).replace("|", "/")
             org_type = str(row["org_type"]).replace("|", "/")
             submission_type = str(row["submission_type"]).replace("|", "/")
             status = str(row["status"]).replace("|", "/")
+            deadline = str(row["deadline_date"] or row["deadline_text"] or "-").replace("|", "/")
             score = int(row["score"] or 0)
             url = str(row["submission_url"])
             link = f"[open]({url})"
             lines.append(
-                f"| {idx} | {priority} | {org_name} | {org_type} | {submission_type} | {status} | {score} | {link} |"
+                f"| {idx} | {priority} | {org_name} | {org_type} | {submission_type} | {status} | {deadline} | {score} | {link} |"
             )
         lines.append("")
 
@@ -1635,8 +1870,9 @@ def _render_submission_report(rows: Sequence[sqlite3.Row], events: Sequence[sqli
                 priority = _priority_for_row(row)
                 org_name = sanitize(str(row["org_name"]), limit=100)
                 requirements = sanitize(str(row["requirements"] or "-"), limit=140)
+                deadline = str(row["deadline_date"] or row["deadline_text"] or "-")
                 lines.append(
-                    f"{idx}. [{priority}] {org_name} | score={int(row['score'] or 0)} | {row['submission_url']} | requirements={requirements}"
+                    f"{idx}. [{priority}] {org_name} | status={row['status']} | deadline={deadline} | {row['submission_url']} | requirements={requirements}"
                 )
             lines.append("")
 
@@ -1653,9 +1889,12 @@ def _render_submission_report(rows: Sequence[sqlite3.Row], events: Sequence[sqli
         lines.append(f"### {idx}. {row['org_name']} ({row['org_type']})")
         lines.append(f"- priority: {_priority_for_row(row)}")
         lines.append(f"- domain: {row['domain']}")
+        lines.append(f"- official_page: {row['source_url']}")
         lines.append(f"- submission_url: {row['submission_url']}")
         lines.append(f"- submission_type: {row['submission_type']}")
         lines.append(f"- status: {row['status']}")
+        if row["deadline_date"] or row["deadline_text"]:
+            lines.append(f"- deadline: {row['deadline_date'] or row['deadline_text']}")
         lines.append(f"- score: {row['score']}")
         if row["requirements"]:
             lines.append(f"- requirements: {row['requirements']}")
@@ -1747,7 +1986,8 @@ def submission_scan_command(args: argparse.Namespace) -> int:
         found.append(target)
         print(
             f"[hit] {idx}/{len(deduped)} {target.org_name} | {target.submission_type} | "
-            f"{target.status} | score={target.score} | {target.submission_url}"
+            f"{target.status} | deadline={target.deadline_date or '-'} | score={target.score} | "
+            f"{target.submission_url}"
         )
 
     changed = store.upsert_targets(found)
@@ -1800,7 +2040,7 @@ def submission_list_command(args: argparse.Namespace) -> int:
         return 0
 
     ordered_rows = _sort_rows_for_report(rows)
-    print("priority\torg_name\torg_type\tsubmission_type\tstatus\tscore\tsubmission_url")
+    print("priority\torg_name\torg_type\tsubmission_type\tstatus\tdeadline\tscore\tofficial_page\tsubmission_url")
     for row in ordered_rows:
         print(
             "\t".join(
@@ -1810,7 +2050,9 @@ def submission_list_command(args: argparse.Namespace) -> int:
                     str(row["org_type"]),
                     str(row["submission_type"]),
                     str(row["status"]),
+                    str(row["deadline_date"] or row["deadline_text"]),
                     str(row["score"]),
+                    str(row["source_url"]),
                     str(row["submission_url"]),
                 ]
             )
@@ -1849,9 +2091,12 @@ def submission_export_command(args: argparse.Namespace) -> int:
         "schema": {
             "org_name": "string",
             "org_type": "VC|Accelerator|Grant|Angel syndicate|Unknown",
+            "source_url": "string(url)",
             "submission_url": "string(url)",
             "submission_type": "form|email|intro-only|unknown",
             "status": "open|rolling|deadline|closed",
+            "deadline_text": "string",
+            "deadline_date": "string(yyyy-mm-dd)",
             "requirements": "string",
             "notes": "string",
             "source_page_snapshot": "string",

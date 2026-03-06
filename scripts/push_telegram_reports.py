@@ -372,9 +372,10 @@ def _is_speedrun_submission(item: Dict[str, object]) -> bool:
 
 
 def _format_submission_item(idx: int, item: Dict[str, object]) -> str:
+    deadline = str(item.get("deadline_date") or item.get("deadline_text") or "-")
     return (
         f"{idx}. {item.get('org_name')} | {item.get('status')} | "
-        f"score={item.get('score')} | {item.get('org_type')} | {item.get('submission_url')}"
+        f"deadline={deadline} | score={item.get('score')} | {item.get('org_type')} | {item.get('submission_url')}"
     )
 
 
