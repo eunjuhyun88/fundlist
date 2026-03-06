@@ -5,7 +5,10 @@ TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 
 (crontab -l 2>/dev/null || true) | awk '
-  !/fundlist-vc-ops-hourly/ && !/scripts\/vc_ops_cron\.sh/
+  !/fundlist-vc-ops-morning/ &&
+  !/fundlist-vc-ops-evening/ &&
+  !/fundlist-vc-ops-hourly/ &&
+  !/scripts\/vc_ops_cron\.sh/
 ' > "$TMP"
 
 crontab "$TMP"
