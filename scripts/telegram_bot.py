@@ -666,6 +666,8 @@ def handle_command(
                     "/task_submitted <task-id> [note]",
                     "/tasks_ready [limit]",
                     "/tasks_followup [limit]",
+                    "/changes_today [limit]",
+                    "/changes_recent [days]",
                     "/submission_report",
                     "/submission_export",
                     "/context_save <summary>",
@@ -1029,6 +1031,24 @@ def handle_command(
         run_cmd = fundlist + ["task-list", "--bucket", bucket, "--limit", limit]
         code, out = run_local_command(run_cmd, timeout_sec=60)
         client.send_message(chat_id, format_command_result(cmd.lstrip("/"), code, out, max_lines=35))
+        return
+
+    if cmd == "/changes_today":
+        limit = "20"
+        if arg and arg.strip().isdigit():
+            limit = str(max(1, min(50, int(arg.strip()))))
+        run_cmd = fundlist + ["changes-list", "--since-days", "1", "--limit", limit]
+        code, out = run_local_command(run_cmd, timeout_sec=60)
+        client.send_message(chat_id, format_command_result("changes-today", code, out, max_lines=35))
+        return
+
+    if cmd == "/changes_recent":
+        days = "7"
+        if arg and arg.strip().isdigit():
+            days = str(max(1, min(30, int(arg.strip()))))
+        run_cmd = fundlist + ["changes-list", "--since-days", days, "--limit", "30"]
+        code, out = run_local_command(run_cmd, timeout_sec=60)
+        client.send_message(chat_id, format_command_result("changes-recent", code, out, max_lines=40))
         return
 
     if cmd == "/submission_report":

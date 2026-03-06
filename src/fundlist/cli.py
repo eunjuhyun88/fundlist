@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .collector import CollectorConfig, collect_from_sources, parse_csv_list
+from .changefeed import changes_list_command, changes_report_command
 from .fundraising import (
     DEFAULT_FUNDRAISE_FILES,
     fundraise_import_command,
@@ -85,6 +86,10 @@ DEFAULT_VC_OPS_REPORT_PATH = os.environ.get(
 DEFAULT_SUBMISSION_REPORT_PATH = os.environ.get(
     "SUBMISSION_REPORT_PATH",
     str(PROJECT_ROOT / "data" / "reports" / "submission_targets_report.md"),
+)
+DEFAULT_CHANGES_REPORT_PATH = os.environ.get(
+    "CHANGES_REPORT_PATH",
+    str(PROJECT_ROOT / "data" / "reports" / "opportunity_changes_report.md"),
 )
 DEFAULT_VC_PROGRAM_REPORT_PATH = os.environ.get(
     "VC_PROGRAM_REPORT_PATH",
@@ -395,6 +400,27 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(PROJECT_ROOT / "data" / "reports" / "submission_targets.json"),
     )
     submission_export.set_defaults(func=submission_export_command)
+
+    changes_list = sub.add_parser("changes-list", help="List structured opportunity changes")
+    changes_list.add_argument(
+        "--change-type",
+        default="",
+        choices=["", "new_opportunity", "status_changed", "deadline_changed", "submission_url_changed", "source_url_changed", "reopened"],
+    )
+    changes_list.add_argument("--since-days", type=int, default=1)
+    changes_list.add_argument("--limit", type=int, default=40)
+    changes_list.set_defaults(func=changes_list_command)
+
+    changes_report = sub.add_parser("changes-report", help="Generate markdown report from structured opportunity changes")
+    changes_report.add_argument(
+        "--change-type",
+        default="",
+        choices=["", "new_opportunity", "status_changed", "deadline_changed", "submission_url_changed", "source_url_changed", "reopened"],
+    )
+    changes_report.add_argument("--since-days", type=int, default=1)
+    changes_report.add_argument("--limit", type=int, default=50)
+    changes_report.add_argument("--output", default=DEFAULT_CHANGES_REPORT_PATH)
+    changes_report.set_defaults(func=changes_report_command)
 
     task_create = sub.add_parser("task-create", help="Create a managed submission task from a verified opportunity")
     task_create.add_argument("target", help="Opportunity fingerprint or keyword query")

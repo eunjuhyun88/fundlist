@@ -8,7 +8,7 @@ import re
 import sqlite3
 import sys
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -214,6 +214,30 @@ def _load_submission_task_rows(db_path: Path, *, submission_state: str = "", lim
     return rows
 
 
+def _load_opportunity_changes(db_path: Path, *, since_hours: int = 24, limit: int = 8) -> List[sqlite3.Row]:
+    if not db_path.exists():
+        return []
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(1, since_hours))).replace(microsecond=0).isoformat()
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, org_name, change_type, old_value, new_value, source_url, submission_url, detected_at
+            FROM opportunity_changes
+            WHERE detected_at >= ?
+            ORDER BY detected_at DESC, id DESC
+            LIMIT ?
+            """,
+            (cutoff, limit),
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        rows = []
+    finally:
+        conn.close()
+    return rows
+
+
 def _format_task_line(idx: int, row: sqlite3.Row) -> str:
     url = str(row["submission_url"] or row["website"] or "").strip()
     reason = str(row["priority_reason"] or "").strip()
@@ -234,10 +258,18 @@ def _format_managed_task_line(idx: int, row: sqlite3.Row) -> str:
     )
 
 
+def _format_change_line(idx: int, row: sqlite3.Row) -> str:
+    old_value = str(row["old_value"] or "-").strip() or "-"
+    new_value = str(row["new_value"] or "-").strip() or "-"
+    url = str(row["submission_url"] or row["source_url"] or "-").strip() or "-"
+    return f"{idx}. {row['org_name']} | {row['change_type']} | {old_value} -> {new_value} | {url}"
+
+
 def build_ops_digest(db_path: Path, report_path: Path, submission_json_path: Path, *, mode: str = "morning") -> str:
     rows = _load_ops_rows(db_path)
     ready_task_rows = _load_submission_task_rows(db_path, submission_state="ready_to_submit", limit=6)
     followup_task_rows = _load_submission_task_rows(db_path, submission_state="follow_up_due", limit=6)
+    opportunity_changes = _load_opportunity_changes(db_path, since_hours=24, limit=8)
     submission_items = _sort_submission_items(load_submission_items(submission_json_path))
     apply_now_items = [
         item
@@ -247,7 +279,7 @@ def build_ops_digest(db_path: Path, report_path: Path, submission_json_path: Pat
     closed_items = [item for item in submission_items if str(item.get("status", "")).lower() == "closed"]
     speedrun_items = [item for item in submission_items if _is_speedrun_submission(item)]
 
-    if not rows and not submission_items and not ready_task_rows and not followup_task_rows:
+    if not rows and not submission_items and not ready_task_rows and not followup_task_rows and not opportunity_changes:
         if not report_path.exists():
             return f"(missing) {report_path}"
         return "[VC OPS]\n" + read_excerpt(report_path, max_lines=50, max_chars=2200)
@@ -264,13 +296,16 @@ def build_ops_digest(db_path: Path, report_path: Path, submission_json_path: Pat
         f"- generated: {now_utc_iso()}",
         f"- active outreach rows: {len(rows)}",
         f"- apply targets: {len(submission_items)}",
-        f"- managed tasks: {len(ready_task_rows) + len(followup_task_rows)} tracked",
+        f"- managed ready/follow-up tasks: {len(ready_task_rows) + len(followup_task_rows)}",
     ]
 
     if mode == "evening":
         out.extend(["", "today changes:"])
         recent_events = _load_recent_events(db_path, limit=6)
-        if recent_events:
+        if opportunity_changes:
+            for idx, row in enumerate(opportunity_changes[:5], start=1):
+                out.append(_format_change_line(idx, row))
+        elif recent_events:
             for event in recent_events:
                 out.append(f"- {event['title']} | {str(event['body'])[:140]}")
         else:
@@ -323,6 +358,7 @@ def build_ops_digest(db_path: Path, report_path: Path, submission_json_path: Pat
         ("today", by_bucket.get("today", []) + by_bucket.get("overdue", []), 5),
         ("this week", by_bucket.get("this_week", []), 6),
         ("apply now", apply_now_items, 6),
+        ("changed recently", opportunity_changes, 5),
         ("ready to submit", ready_task_rows, 5),
         ("follow-up due", followup_task_rows, 5),
         ("closed / skip", closed_items, 4),
@@ -333,7 +369,10 @@ def build_ops_digest(db_path: Path, report_path: Path, submission_json_path: Pat
         out.extend(["", f"{title_text}:"])
         if section_rows:
             first = section_rows[0]
-            if isinstance(first, sqlite3.Row) and "submission_state" in first.keys():
+            if isinstance(first, sqlite3.Row) and "change_type" in first.keys():
+                for idx, row in enumerate(section_rows[:limit], start=1):
+                    out.append(_format_change_line(idx, row))
+            elif isinstance(first, sqlite3.Row) and "submission_state" in first.keys():
                 for idx, row in enumerate(section_rows[:limit], start=1):
                     out.append(_format_managed_task_line(idx, row))
             elif isinstance(first, sqlite3.Row):

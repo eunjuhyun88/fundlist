@@ -396,6 +396,22 @@ class SubmissionStore:
             """
         )
         self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS opportunity_changes (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              fingerprint TEXT NOT NULL,
+              org_name TEXT NOT NULL,
+              domain TEXT NOT NULL,
+              change_type TEXT NOT NULL,
+              old_value TEXT NOT NULL DEFAULT '',
+              new_value TEXT NOT NULL DEFAULT '',
+              source_url TEXT NOT NULL DEFAULT '',
+              submission_url TEXT NOT NULL DEFAULT '',
+              detected_at TEXT NOT NULL
+            )
+            """
+        )
+        self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_submission_score ON submission_targets(score DESC, last_checked_at DESC)"
         )
         self.conn.execute(
@@ -403,6 +419,12 @@ class SubmissionStore:
         )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_submission_events_time ON submission_target_events(detected_at DESC)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_opportunity_changes_time ON opportunity_changes(detected_at DESC)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_opportunity_changes_fp ON opportunity_changes(fingerprint, detected_at DESC)"
         )
         self.conn.commit()
 
@@ -412,10 +434,18 @@ class SubmissionStore:
         if column not in cols:
             self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
+    def _table_exists(self, table: str) -> bool:
+        cur = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            (table,),
+        )
+        return cur.fetchone() is not None
+
     def _state_from_row(self, row: sqlite3.Row) -> Dict[str, object]:
         return {
             "org_name": row["org_name"],
             "org_type": row["org_type"],
+            "source_url": row["source_url"],
             "submission_url": row["submission_url"],
             "submission_type": row["submission_type"],
             "status": row["status"],
@@ -432,6 +462,7 @@ class SubmissionStore:
         return {
             "org_name": target.org_name,
             "org_type": target.org_type,
+            "source_url": target.source_url,
             "submission_url": target.submission_url,
             "submission_type": target.submission_type,
             "status": target.status,
@@ -454,7 +485,7 @@ class SubmissionStore:
         before_state: Dict[str, object],
         after_state: Dict[str, object],
         detected_at: str,
-    ) -> None:
+        ) -> None:
         self.conn.execute(
             """
             INSERT INTO submission_target_events (
@@ -471,6 +502,304 @@ class SubmissionStore:
                 detected_at,
             ),
         )
+
+    def _insert_structured_change(
+        self,
+        *,
+        fingerprint: str,
+        org_name: str,
+        domain: str,
+        change_type: str,
+        old_value: object,
+        new_value: object,
+        source_url: str,
+        submission_url: str,
+        detected_at: str,
+    ) -> None:
+        old_text = "" if old_value is None else str(old_value)
+        new_text = "" if new_value is None else str(new_value)
+        if old_text == new_text and change_type != "new_opportunity":
+            return
+        self.conn.execute(
+            """
+            INSERT INTO opportunity_changes (
+              fingerprint, org_name, domain, change_type, old_value, new_value,
+              source_url, submission_url, detected_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                fingerprint,
+                org_name,
+                domain,
+                change_type,
+                old_text,
+                new_text,
+                source_url,
+                submission_url,
+                detected_at,
+            ),
+        )
+
+    def _record_structured_changes(
+        self,
+        *,
+        fingerprint: str,
+        domain: str,
+        old_state: Dict[str, object],
+        new_state: Dict[str, object],
+        detected_at: str,
+    ) -> None:
+        org_name = str(new_state.get("org_name") or old_state.get("org_name") or "")
+        source_url = str(new_state.get("source_url") or old_state.get("source_url") or "")
+        submission_url = str(new_state.get("submission_url") or old_state.get("submission_url") or "")
+        if not old_state:
+            self._insert_structured_change(
+                fingerprint=fingerprint,
+                org_name=org_name,
+                domain=domain,
+                change_type="new_opportunity",
+                old_value="",
+                new_value=str(new_state.get("status") or ""),
+                source_url=source_url,
+                submission_url=submission_url,
+                detected_at=detected_at,
+            )
+            return
+
+        old_status = str(old_state.get("status") or "")
+        new_status = str(new_state.get("status") or "")
+        if old_status != new_status:
+            change_type = "status_changed"
+            if old_status.strip().lower() == "closed" and new_status.strip().lower() in {"open", "rolling", "deadline"}:
+                change_type = "reopened"
+            self._insert_structured_change(
+                fingerprint=fingerprint,
+                org_name=org_name,
+                domain=domain,
+                change_type=change_type,
+                old_value=old_status,
+                new_value=new_status,
+                source_url=source_url,
+                submission_url=submission_url,
+                detected_at=detected_at,
+            )
+
+        old_deadline = str(old_state.get("deadline_date") or old_state.get("deadline_text") or "")
+        new_deadline = str(new_state.get("deadline_date") or new_state.get("deadline_text") or "")
+        if old_deadline != new_deadline:
+            self._insert_structured_change(
+                fingerprint=fingerprint,
+                org_name=org_name,
+                domain=domain,
+                change_type="deadline_changed",
+                old_value=old_deadline,
+                new_value=new_deadline,
+                source_url=source_url,
+                submission_url=submission_url,
+                detected_at=detected_at,
+            )
+
+        old_submission_url = str(old_state.get("submission_url") or "")
+        new_submission_url = str(new_state.get("submission_url") or "")
+        if old_submission_url != new_submission_url:
+            self._insert_structured_change(
+                fingerprint=fingerprint,
+                org_name=org_name,
+                domain=domain,
+                change_type="submission_url_changed",
+                old_value=old_submission_url,
+                new_value=new_submission_url,
+                source_url=source_url,
+                submission_url=new_submission_url,
+                detected_at=detected_at,
+            )
+
+        old_source_url = str(old_state.get("source_url") or "")
+        new_source_url = str(new_state.get("source_url") or "")
+        if old_source_url != new_source_url:
+            self._insert_structured_change(
+                fingerprint=fingerprint,
+                org_name=org_name,
+                domain=domain,
+                change_type="source_url_changed",
+                old_value=old_source_url,
+                new_value=new_source_url,
+                source_url=new_source_url,
+                submission_url=submission_url,
+                detected_at=detected_at,
+            )
+
+    def _find_existing_target_row(self, target: SubmissionTarget) -> Optional[sqlite3.Row]:
+        self.conn.row_factory = sqlite3.Row
+        cur = self.conn.execute(
+            """
+            SELECT id, fingerprint, org_name, org_type, source_url, submission_url, submission_type,
+                   status, requirements, notes, evidence, source_page_snapshot, deadline_text, deadline_date,
+                   score, domain
+            FROM submission_targets
+            WHERE fingerprint = ?
+            LIMIT 1
+            """,
+            (target.fingerprint,),
+        )
+        row = cur.fetchone()
+        if row is not None:
+            return row
+        cur = self.conn.execute(
+            """
+            SELECT id, fingerprint, org_name, org_type, source_url, submission_url, submission_type,
+                   status, requirements, notes, evidence, source_page_snapshot, deadline_text, deadline_date,
+                   score, domain
+            FROM submission_targets
+            WHERE lower(org_name) = lower(?)
+              AND (
+                domain = ?
+                OR lower(source_url) = lower(?)
+              )
+            ORDER BY last_checked_at DESC, score DESC, id DESC
+            LIMIT 1
+            """,
+            (
+                target.org_name,
+                target.domain,
+                _canonicalize_url(target.source_url),
+            ),
+        )
+        return cur.fetchone()
+
+    def _recommended_action_for_state(self, *, status: str, deadline_date: str) -> str:
+        status_low = str(status or "").strip().lower()
+        due = str(deadline_date or "").strip()
+        if status_low == "deadline":
+            return f"review requirements and prepare submission before {due or '-'}"
+        if status_low in {"open", "rolling"}:
+            return "review requirements, prepare materials, and move to ready_to_submit"
+        if status_low == "closed":
+            return "do not prepare submission; watch for reopen or next cohort"
+        return "reverify opportunity before assigning submission work"
+
+    def _sync_tasks_for_target(
+        self,
+        *,
+        old_fingerprint: str,
+        old_state: Dict[str, object],
+        target: SubmissionTarget,
+        detected_at: str,
+    ) -> None:
+        if not self._table_exists("submission_tasks"):
+            return
+        self.conn.row_factory = sqlite3.Row
+        cur = self.conn.execute(
+            """
+            SELECT id, opportunity_fingerprint, submission_state, due_date, priority_score,
+                   recommended_action, submitted_at, follow_up_due_at
+            FROM submission_tasks
+            WHERE opportunity_fingerprint = ?
+            ORDER BY id ASC
+            """,
+            (old_fingerprint,),
+        )
+        rows = list(cur.fetchall())
+        if not rows:
+            return
+
+        old_due = str(old_state.get("deadline_date") or old_state.get("deadline_text") or "").strip()
+        new_due = str(target.deadline_date or "").strip()
+        old_priority = int(old_state.get("score") or 0)
+        new_priority = int(target.score or 0)
+        old_recommended = self._recommended_action_for_state(
+            status=str(old_state.get("status") or ""),
+            deadline_date=str(old_state.get("deadline_date") or ""),
+        )
+        new_recommended = self._recommended_action_for_state(status=target.status, deadline_date=target.deadline_date)
+
+        for row in rows:
+            submission_state = str(row["submission_state"] or "").strip().lower()
+            current_due = str(row["due_date"] or "").strip()
+            current_priority = int(row["priority_score"] or 0)
+            current_recommended = str(row["recommended_action"] or "").strip()
+            submitted_at = str(row["submitted_at"] or "").strip()
+            follow_up_due_at = str(row["follow_up_due_at"] or "").strip()
+
+            synced_due = current_due
+            if (
+                submission_state not in {"submitted", "follow_up_due", "won", "rejected", "archived"}
+                and not submitted_at
+                and not follow_up_due_at
+                and (not current_due or current_due == old_due)
+            ):
+                synced_due = new_due
+
+            synced_priority = current_priority
+            if current_priority == old_priority:
+                synced_priority = new_priority
+
+            synced_recommended = current_recommended
+            if not current_recommended or current_recommended == old_recommended:
+                synced_recommended = new_recommended
+
+            self.conn.execute(
+                """
+                UPDATE submission_tasks
+                SET opportunity_fingerprint = ?,
+                    org_name = ?,
+                    domain = ?,
+                    official_page = ?,
+                    submission_url = ?,
+                    opportunity_status = ?,
+                    due_date = ?,
+                    priority_score = ?,
+                    recommended_action = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    target.fingerprint,
+                    target.org_name,
+                    target.domain,
+                    target.source_url,
+                    target.submission_url,
+                    target.status,
+                    synced_due,
+                    synced_priority,
+                    synced_recommended,
+                    detected_at,
+                    int(row["id"]),
+                ),
+            )
+
+            change_bits: List[str] = []
+            if old_fingerprint != target.fingerprint:
+                change_bits.append("fingerprint relinked")
+            if old_state.get("status") != target.status:
+                change_bits.append(f"status -> {target.status}")
+            if current_due != synced_due:
+                change_bits.append(f"due_date -> {synced_due or '-'}")
+            if current_priority != synced_priority:
+                change_bits.append(f"priority_score -> {synced_priority}")
+            if current_recommended != synced_recommended:
+                change_bits.append("recommended_action synced")
+            old_submission_url = str(old_state.get("submission_url") or "").strip()
+            if old_submission_url != target.submission_url:
+                change_bits.append("submission_url synced")
+            old_source_url = str(old_state.get("source_url") or "").strip()
+            if old_source_url != target.source_url:
+                change_bits.append("official_page synced")
+
+            if change_bits:
+                self.conn.execute(
+                    """
+                    INSERT INTO submission_task_updates (task_id, event_type, body, actor, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        int(row["id"]),
+                        "opportunity_synced",
+                        "; ".join(change_bits),
+                        "system",
+                        detected_at,
+                    ),
+                )
 
     def upsert_targets(self, targets: Sequence[SubmissionTarget]) -> int:
         now = now_utc_iso()
@@ -499,14 +828,11 @@ class SubmissionStore:
         before = self.conn.total_changes
         with self.conn:
             for target in targets:
-                cur = self.conn.execute(
-                    "SELECT org_name, org_type, submission_url, submission_type, status, requirements, notes, evidence, source_page_snapshot, deadline_text, deadline_date, score FROM submission_targets WHERE fingerprint = ?",
-                    (target.fingerprint,),
-                )
-                old_row = cur.fetchone()
+                old_row = self._find_existing_target_row(target)
                 old_state = self._state_from_row(old_row) if old_row else {}
                 new_state = self._state_from_target(target)
                 event_type = "created" if old_row is None else "updated"
+                old_fingerprint = str(old_row["fingerprint"] or "") if old_row is not None else ""
 
                 if old_row is None or old_state != new_state:
                     self._insert_event(
@@ -516,6 +842,13 @@ class SubmissionStore:
                         event_type=event_type,
                         before_state=old_state,
                         after_state=new_state,
+                        detected_at=now,
+                    )
+                    self._record_structured_changes(
+                        fingerprint=target.fingerprint,
+                        domain=target.domain,
+                        old_state=old_state,
+                        new_state=new_state,
                         detected_at=now,
                     )
 
@@ -541,6 +874,15 @@ class SubmissionStore:
                         now,
                     ),
                 )
+                if old_row is not None and old_fingerprint and old_state != new_state:
+                    self._sync_tasks_for_target(
+                        old_fingerprint=old_fingerprint,
+                        old_state=old_state,
+                        target=target,
+                        detected_at=now,
+                    )
+                if old_row is not None and old_fingerprint and old_fingerprint != target.fingerprint:
+                    self.conn.execute("DELETE FROM submission_targets WHERE fingerprint = ?", (old_fingerprint,))
         return self.conn.total_changes - before
 
     def list_targets(
@@ -562,7 +904,7 @@ class SubmissionStore:
             args.append(org_type)
         sql = f"""
             SELECT id, org_name, org_type, domain, source_url, submission_url, submission_type,
-                   status, requirements, notes, evidence, source_page_snapshot,
+                   fingerprint, status, requirements, notes, evidence, source_page_snapshot,
                    deadline_text, deadline_date, score,
                    discovered_at, last_checked_at
             FROM submission_targets
@@ -585,6 +927,34 @@ class SubmissionStore:
             """,
             (limit,),
         )
+        return cur.fetchall()
+
+    def list_changes(
+        self,
+        *,
+        limit: int = 50,
+        change_type: str = "",
+        since: str = "",
+    ) -> List[sqlite3.Row]:
+        self.conn.row_factory = sqlite3.Row
+        where: List[str] = ["1 = 1"]
+        args: List[object] = []
+        if change_type:
+            where.append("change_type = ?")
+            args.append(change_type)
+        if since:
+            where.append("detected_at >= ?")
+            args.append(since)
+        sql = f"""
+            SELECT id, fingerprint, org_name, domain, change_type, old_value, new_value,
+                   source_url, submission_url, detected_at
+            FROM opportunity_changes
+            WHERE {' AND '.join(where)}
+            ORDER BY detected_at DESC, id DESC
+            LIMIT ?
+        """
+        args.append(limit)
+        cur = self.conn.execute(sql, tuple(args))
         return cur.fetchall()
 
     def prune_scanned_domains(self, scanned_domains: Sequence[str], keep_fingerprints: Sequence[str]) -> int:
@@ -1748,6 +2118,7 @@ def _rows_to_json(rows: Sequence[sqlite3.Row]) -> List[Dict[str, object]]:
     for row in rows:
         out.append(
             {
+                "fingerprint": row["fingerprint"],
                 "org_name": row["org_name"],
                 "org_type": row["org_type"],
                 "domain": row["domain"],
