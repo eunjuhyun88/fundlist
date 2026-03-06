@@ -96,6 +96,27 @@ if [[ "${VC_SUBMISSION_SCAN:-1}" != "0" ]]; then
   /usr/bin/python3 "$REPO_DIR/fundlist.py" submission-scan "${SUBMISSION_ARGS[@]}" >> "$LOG_FILE" 2>&1 || true
 fi
 
+if [[ "${VC_SUBMISSION_REVIEW_RETRY:-1}" != "0" ]]; then
+  REVIEW_LIMIT="${VC_SUBMISSION_REVIEW_LIMIT:-30}"
+  REVIEW_ARGS=(
+    --review-targets-only
+    --skip-search
+    --no-fundraise-seeds
+    --review-target-limit "$REVIEW_LIMIT"
+    --max-sites "$REVIEW_LIMIT"
+    --max-pages-per-site "${VC_SUBMISSION_MAX_PAGES:-6}"
+    --http-timeout "${VC_SUBMISSION_HTTP_TIMEOUT:-8}"
+    --min-score "${VC_SUBMISSION_MIN_SCORE:-4}"
+    --event-limit "${VC_SUBMISSION_EVENT_LIMIT:-20}"
+    --report-limit "${VC_SUBMISSION_REPORT_LIMIT:-120}"
+    --output "$REPO_DIR/data/reports/submission_targets_report.md"
+  )
+  if [[ "${VC_SUBMISSION_JSON_OUTPUT:-1}" != "0" ]]; then
+    REVIEW_ARGS+=(--json-output "$REPO_DIR/data/reports/submission_targets.json")
+  fi
+  /usr/bin/python3 "$REPO_DIR/fundlist.py" submission-scan "${REVIEW_ARGS[@]}" >> "$LOG_FILE" 2>&1 || true
+fi
+
 if [[ "${VC_SUBMISSION_FALLBACK:-1}" != "0" ]]; then
   FALLBACK_ARGS=(
     --limit "${VC_SUBMISSION_FAILURE_LIMIT:-20}"

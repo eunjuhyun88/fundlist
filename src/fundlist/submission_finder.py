@@ -1289,6 +1289,49 @@ class SubmissionStore:
             )
         return out
 
+    def load_review_target_seeds(self, *, limit: int = 80) -> List[DiscoverySeed]:
+        self.conn.row_factory = sqlite3.Row
+        cur = self.conn.execute(
+            """
+            SELECT fingerprint, org_name, source_url, submission_url, submission_type, status, deadline_text, score, last_checked_at
+            FROM submission_targets
+            WHERE submission_type = 'unknown'
+               OR status = 'unknown'
+               OR (status = 'deadline' AND trim(deadline_date) = '' AND trim(deadline_text) = '')
+            ORDER BY
+              CASE
+                WHEN status = 'unknown' THEN 0
+                WHEN submission_type = 'unknown' THEN 1
+                ELSE 2
+              END,
+              score DESC,
+              last_checked_at DESC,
+              id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        out: List[DiscoverySeed] = []
+        seen: set[str] = set()
+        for row in cur.fetchall():
+            candidate_url = str(row["source_url"] or "").strip() or str(row["submission_url"] or "").strip()
+            url = _normalize_seed_url(candidate_url)
+            if not url:
+                continue
+            key = _seed_identity(url)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            fingerprint = str(row["fingerprint"] or "").strip()
+            out.append(
+                DiscoverySeed(
+                    url=url,
+                    org_name_hint=sanitize(str(row["org_name"] or ""), limit=120),
+                    source=f"review-target:{fingerprint}",
+                )
+            )
+        return out
+
     def prune_scanned_domains(self, scanned_domains: Sequence[str], keep_fingerprints: Sequence[str]) -> int:
         domains = [d.strip().lower() for d in scanned_domains if d and _is_target_domain(d.strip().lower())]
         if not domains:
@@ -2653,7 +2696,8 @@ def submission_scan_command(args: argparse.Namespace) -> int:
 
     manual_seeds = [s.strip() for s in (args.seed_urls or "").split(",") if s.strip()]
     seeds: List[DiscoverySeed] = []
-    if not args.failures_only:
+    only_retry_mode = bool(args.failures_only or args.review_targets_only)
+    if not only_retry_mode:
         seeds.extend(DiscoverySeed(url=_normalize_seed_url(u), org_name_hint="", source="manual") for u in manual_seeds)
         # Re-check previously known submission targets first, then expand to fundraising DB websites.
         seeds.extend(_load_submission_target_seeds(args.db, limit=max(120, min(args.max_sites * 3, 360))))
@@ -2665,10 +2709,15 @@ def submission_scan_command(args: argparse.Namespace) -> int:
         resumed_failure_seeds = store.load_pending_failure_seeds(limit=args.failure_limit)
         seeds = resumed_failure_seeds + seeds
 
+    resumed_review_target_seeds: List[DiscoverySeed] = []
+    if args.review_targets or args.review_targets_only:
+        resumed_review_target_seeds = store.load_review_target_seeds(limit=args.review_target_limit)
+        seeds = resumed_review_target_seeds + seeds
+
     queries: List[str] = list(args.query or [])
     if args.query_file:
         queries.extend(_load_query_file(args.query_file))
-    if not queries and not args.skip_search and not args.failures_only:
+    if not queries and not args.skip_search and not only_retry_mode:
         queries = list(DEFAULT_DISCOVERY_QUERIES)
 
     sectors = _parse_terms(args.sector)
@@ -2676,7 +2725,7 @@ def submission_scan_command(args: argparse.Namespace) -> int:
     regions = _parse_terms(args.region)
     queries = _extend_queries_with_focus(queries, sectors=sectors, stages=stages, regions=regions)
 
-    if not args.skip_search and not args.failures_only:
+    if not args.skip_search and not only_retry_mode:
         for query in queries:
             try:
                 hits = _search_duckduckgo(query, max_results=args.max_results_per_query)
@@ -2704,6 +2753,8 @@ def submission_scan_command(args: argparse.Namespace) -> int:
     print(f"[info] seeds={len(deduped)} (raw={len(seeds)})")
     if resumed_failure_seeds:
         print(f"[info] resumed_failures={len(resumed_failure_seeds)}")
+    if resumed_review_target_seeds:
+        print(f"[info] resumed_review_targets={len(resumed_review_target_seeds)}")
     print(f"[info] seed_sources(raw)={raw_desc}")
     print(f"[info] seed_sources(deduped)={deduped_desc}")
     preview_groups: Dict[str, List[DiscoverySeed]] = {}

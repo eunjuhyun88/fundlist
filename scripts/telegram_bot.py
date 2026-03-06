@@ -754,10 +754,13 @@ def build_quickstart_text() -> str:
             "/scan_failures 20",
             "/retry_failed 50",
             "",
-            "9. AI fallback으로 실패 복구하기",
+            "9. unknown target 다시 검증하기",
+            "/retry_unknown 20",
+            "",
+            "10. AI fallback으로 실패 복구하기",
             "/retry_failed_ai 20",
             "",
-            "10. 불확실 항목 검토하기",
+            "11. 불확실 항목 검토하기",
             "/review_queue 20",
             "/review_set target:<fingerprint> status=closed",
             "",
@@ -826,6 +829,8 @@ def build_help_text(
                     "  unresolved scan failure 목록",
                     "/retry_failed [limit]",
                     "  실패한 seed만 재시도",
+                    "/retry_unknown [limit]",
+                    "  unknown/불확실 target만 재검증",
                     "/retry_failed_ai [limit]",
                     "  검색 + AI 후보선택으로 실패 seed 복구 시도",
                     "/review_queue [limit]",
@@ -912,16 +917,18 @@ def build_help_text(
                     "   중단/예외 난 seed 확인",
                     "5. /retry_failed 50",
                     "   실패 seed만 다시 스캔",
-                    "6. /retry_failed_ai 20",
+                    "6. /retry_unknown 20",
+                    "   unknown/deadline-missing target 재검증",
+                    "7. /retry_failed_ai 20",
                     "   검색 + AI fallback으로 대체 링크 복구",
-                    "7. /review_queue 20",
+                    "8. /review_queue 20",
                     "   실패 + unknown 항목 검토",
-                    "8. /review_set target:<fingerprint> status=deadline deadline_date=2026-03-25 submission_url=https://alliance.xyz/apply",
+                    "9. /review_set target:<fingerprint> status=deadline deadline_date=2026-03-25 submission_url=https://alliance.xyz/apply",
                     "   target 항목 수동 보정",
-                    "9. /review_ignore failure:123",
+                    "10. /review_ignore failure:123",
                     "   잘못된 failure 항목 숨기기",
-                    "10. 이상한 항목은 공식 링크 직접 열어 확인",
-                    "11. 맞는 항목은 /task_create <query>",
+                    "11. 이상한 항목은 공식 링크 직접 열어 확인",
+                    "12. 맞는 항목은 /task_create <query>",
                     "",
                     "이상 징후 예:",
                     "- closed 인데 open 으로 보임",
@@ -932,6 +939,7 @@ def build_help_text(
                     "관련 명령:",
                     "/changes_recent 7",
                     "/review_queue 20",
+                    "/retry_unknown 20",
                     "/review_set target:<fingerprint> status=open",
                     "/review_ignore failure:123",
                     "/submission_list 30",
@@ -975,6 +983,7 @@ def build_help_text(
                 "/submission_scan [full|query]",
                 "/scan_failures [limit]",
                 "/retry_failed [limit]",
+                "/retry_unknown [limit]",
                 "/retry_failed_ai [limit]",
                 "/review_queue [limit]",
                 "/review_resolve <failure:id>",
@@ -1361,6 +1370,33 @@ def handle_command(
         ]
         code, out = run_local_command(run_cmd, timeout_sec=1200)
         msg = [format_command_result("retry-failed", code, out, max_lines=50), "", read_report(DEFAULT_SUBMISSION_REPORT)]
+        client.send_message(chat_id, "\n".join(msg))
+        return
+
+    if cmd == "/retry_unknown":
+        limit = os.environ.get("VC_SUBMISSION_REVIEW_LIMIT", "30")
+        if arg and arg.strip().isdigit():
+            limit = str(max(1, min(200, int(arg.strip()))))
+        run_cmd = fundlist + [
+            "submission-scan",
+            "--review-targets-only",
+            "--skip-search",
+            "--no-fundraise-seeds",
+            "--review-target-limit",
+            limit,
+            "--max-sites",
+            limit,
+            "--max-pages-per-site",
+            os.environ.get("VC_SUBMISSION_MAX_PAGES", "6"),
+            "--report-limit",
+            os.environ.get("VC_SUBMISSION_REPORT_LIMIT", "120"),
+            "--output",
+            str(DEFAULT_SUBMISSION_REPORT),
+            "--json-output",
+            str(DEFAULT_SUBMISSION_JSON),
+        ]
+        code, out = run_local_command(run_cmd, timeout_sec=1200)
+        msg = [format_command_result("retry-unknown", code, out, max_lines=50), "", read_report(DEFAULT_SUBMISSION_REPORT)]
         client.send_message(chat_id, "\n".join(msg))
         return
 

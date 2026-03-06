@@ -367,6 +367,34 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/JobResponse'
+  /scans/review-retry:
+    post:
+      tags: [scans]
+      summary: Retry unknown or uncertain reviewed targets only
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                review_target_limit:
+                  type: integer
+                max_sites:
+                  type: integer
+                max_pages_per_site:
+                  type: integer
+                http_timeout:
+                  type: integer
+                report_limit:
+                  type: integer
+      responses:
+        '202':
+          description: Review retry scan accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobResponse'
   /scans/fallback:
     post:
       tags: [scans]

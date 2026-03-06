@@ -235,6 +235,9 @@ class FundlistAPIHandler(BaseHTTPRequestHandler):
             if parts == ["v1", "scans", "delta"]:
                 self._handle_scan(body, full=False)
                 return
+            if parts == ["v1", "scans", "review-retry"]:
+                self._handle_scan(body, full=False, review_targets_only=True)
+                return
             if parts == ["v1", "scans", "fallback"]:
                 self._handle_fallback_scan(body)
                 return
@@ -477,7 +480,7 @@ class FundlistAPIHandler(BaseHTTPRequestHandler):
             },
         )
 
-    def _handle_scan(self, body: Dict[str, Any], *, full: bool) -> None:
+    def _handle_scan(self, body: Dict[str, Any], *, full: bool, review_targets_only: bool = False) -> None:
         seed_urls = _split_csv(body.get("seed_urls"))
         query_values = _split_csv(body.get("queries") or body.get("query"))
         args = [
@@ -491,10 +494,15 @@ class FundlistAPIHandler(BaseHTTPRequestHandler):
             args.extend(["--seed-urls", ",".join(seed_urls)])
         for query in query_values:
             args.extend(["--query", query])
-        if _parse_bool(body.get("skip_search"), default=not full):
+        if review_targets_only or _parse_bool(body.get("review_targets_only"), default=False):
+            args.append("--review-targets-only")
+        elif _parse_bool(body.get("review_targets"), default=False):
+            args.append("--review-targets")
+        if _parse_bool(body.get("skip_search"), default=(not full or review_targets_only)):
             args.append("--skip-search")
-        if not _parse_bool(body.get("from_fundraise"), default=True):
+        if not _parse_bool(body.get("from_fundraise"), default=(not review_targets_only)):
             args.append("--no-fundraise-seeds")
+        args.extend(["--review-target-limit", str(_parse_int(body.get("review_target_limit"), default=80, minimum=1, maximum=500))])
         args.extend(["--fundraise-seed-limit", str(_parse_int(body.get("fundraise_seed_limit"), default=300, minimum=0))])
         args.extend(["--max-results-per-query", str(_parse_int(body.get("max_results_per_query"), default=10, minimum=1, maximum=100))])
         args.extend(["--max-sites", str(_parse_int(body.get("max_sites"), default=120 if full else 40, minimum=1, maximum=500))])
@@ -512,7 +520,7 @@ class FundlistAPIHandler(BaseHTTPRequestHandler):
         proc = subprocess.run(args, capture_output=True, text=True, cwd=str(PROJECT_ROOT))
         payload = {
             "ok": proc.returncode == 0,
-            "scan_type": "full" if full else "delta",
+            "scan_type": "review_retry" if review_targets_only else ("full" if full else "delta"),
             "returncode": proc.returncode,
             "stdout": proc.stdout,
             "stderr": proc.stderr,
