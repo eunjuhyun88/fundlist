@@ -96,6 +96,17 @@ if [[ "${VC_SUBMISSION_SCAN:-1}" != "0" ]]; then
   /usr/bin/python3 "$REPO_DIR/fundlist.py" submission-scan "${SUBMISSION_ARGS[@]}" >> "$LOG_FILE" 2>&1 || true
 fi
 
+if [[ "${VC_SUBMISSION_FALLBACK:-1}" != "0" ]]; then
+  FALLBACK_ARGS=(
+    --limit "${VC_SUBMISSION_FAILURE_LIMIT:-20}"
+    --output "$REPO_DIR/data/reports/submission_fallback_report.md"
+    --json-output "$REPO_DIR/data/reports/submission_fallback.json"
+    --refresh-submission-report "$REPO_DIR/data/reports/submission_targets_report.md"
+    --refresh-submission-json "$REPO_DIR/data/reports/submission_targets.json"
+  )
+  /usr/bin/python3 "$REPO_DIR/fundlist.py" submission-fallback "${FALLBACK_ARGS[@]}" >> "$LOG_FILE" 2>&1 || true
+fi
+
 
 
 if [[ "${VC_OPS_PUSH_TELEGRAM:-1}" != "0" ]]; then

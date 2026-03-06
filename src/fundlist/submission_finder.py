@@ -1107,6 +1107,41 @@ class SubmissionStore:
             )
         return self.conn.total_changes - before
 
+    def set_scan_failure_status(self, ref: str, *, status: str, changed_at: str) -> int:
+        status_low = str(status or "").strip().lower()
+        if status_low not in {"pending", "resolved", "ignored"}:
+            return 0
+        raw_ref = str(ref or "").strip()
+        if raw_ref.startswith("failure:"):
+            raw_ref = raw_ref.split(":", 1)[1].strip()
+        before = self.conn.total_changes
+        with self.conn:
+            if raw_ref.isdigit():
+                where_sql = "id = ?"
+                where_arg: object = int(raw_ref)
+            else:
+                normalized = _canonicalize_url(raw_ref)
+                if not normalized:
+                    return 0
+                where_sql = "seed_url = ?"
+                where_arg = normalized
+            self.conn.execute(
+                f"""
+                UPDATE scan_failures
+                SET status = ?,
+                    resolved_at = ?,
+                    last_attempted_at = ?
+                WHERE {where_sql}
+                """,
+                (
+                    status_low,
+                    "" if status_low == "pending" else changed_at,
+                    changed_at,
+                    where_arg,
+                ),
+            )
+        return self.conn.total_changes - before
+
     def list_scan_failures(
         self,
         *,
@@ -1117,7 +1152,7 @@ class SubmissionStore:
         where: List[str] = ["1 = 1"]
         args: List[object] = []
         status_low = status.strip().lower()
-        if status_low in {"pending", "resolved"}:
+        if status_low in {"pending", "resolved", "ignored"}:
             where.append("status = ?")
             args.append(status_low)
         sql = f"""
@@ -1126,7 +1161,7 @@ class SubmissionStore:
             FROM scan_failures
             WHERE {' AND '.join(where)}
             ORDER BY
-              CASE status WHEN 'pending' THEN 0 ELSE 1 END,
+              CASE status WHEN 'pending' THEN 0 WHEN 'resolved' THEN 1 ELSE 2 END,
               last_attempted_at DESC,
               id DESC
             LIMIT ?
@@ -2777,5 +2812,19 @@ def scan_failures_command(args: argparse.Namespace) -> int:
                     str(row["error_message"]),
                 ]
             )
-        )
+    )
+    return 0
+
+
+def scan_failure_resolve_command(args: argparse.Namespace) -> int:
+    store = SubmissionStore(args.db)
+    changed = store.set_scan_failure_status(args.ref, status="resolved", changed_at=now_utc_iso())
+    print(f"[done] resolved={changed} ref={args.ref}")
+    return 0
+
+
+def scan_failure_ignore_command(args: argparse.Namespace) -> int:
+    store = SubmissionStore(args.db)
+    changed = store.set_scan_failure_status(args.ref, status="ignored", changed_at=now_utc_iso())
+    print(f"[done] ignored={changed} ref={args.ref}")
     return 0

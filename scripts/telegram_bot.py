@@ -783,6 +783,10 @@ def build_help_text(
                     "  검색 + AI 후보선택으로 실패 seed 복구 시도",
                     "/review_queue [limit]",
                     "  실패 항목 + 불확실 target 검토 큐",
+                    "/review_resolve <failure:id>",
+                    "  failure 항목을 수동 resolved 처리",
+                    "/review_ignore <failure:id>",
+                    "  failure 항목을 ignore 처리",
                     "/apply_open [limit]",
                     "  지금 제출 가능한 항목",
                     "/apply_deadline [limit]",
@@ -863,8 +867,10 @@ def build_help_text(
                     "   검색 + AI fallback으로 대체 링크 복구",
                     "7. /review_queue 20",
                     "   실패 + unknown 항목 검토",
-                    "8. 이상한 항목은 공식 링크 직접 열어 확인",
-                    "9. 맞는 항목은 /task_create <query>",
+                    "8. /review_ignore failure:123",
+                    "   잘못된 failure 항목 숨기기",
+                    "9. 이상한 항목은 공식 링크 직접 열어 확인",
+                    "10. 맞는 항목은 /task_create <query>",
                     "",
                     "이상 징후 예:",
                     "- closed 인데 open 으로 보임",
@@ -875,6 +881,7 @@ def build_help_text(
                     "관련 명령:",
                     "/changes_recent 7",
                     "/review_queue 20",
+                    "/review_ignore failure:123",
                     "/submission_list 30",
                     "/task_view <task-id>",
                 ]
@@ -918,6 +925,8 @@ def build_help_text(
                 "/retry_failed [limit]",
                 "/retry_failed_ai [limit]",
                 "/review_queue [limit]",
+                "/review_resolve <failure:id>",
+                "/review_ignore <failure:id>",
                 "/apply_open [limit]",
                 "/apply_deadline [limit]",
                 "/apply_closed [limit]",
@@ -1331,6 +1340,17 @@ def handle_command(
         run_cmd = fundlist + ["review-queue", "--limit", limit]
         code, out = run_local_command(run_cmd, timeout_sec=60)
         client.send_message(chat_id, format_command_result("review-queue", code, out, max_lines=45))
+        return
+
+    if cmd in {"/review_resolve", "/review_ignore"}:
+        raw_ref = (arg or "").strip()
+        if not raw_ref:
+            client.send_message(chat_id, f"usage: {cmd} <failure:id|id|seed-url>")
+            return
+        subcmd = "scan-failure-resolve" if cmd == "/review_resolve" else "scan-failure-ignore"
+        run_cmd = fundlist + [subcmd, raw_ref]
+        code, out = run_local_command(run_cmd, timeout_sec=60)
+        client.send_message(chat_id, format_command_result(subcmd, code, out, max_lines=20))
         return
 
     if cmd == "/submission_list":

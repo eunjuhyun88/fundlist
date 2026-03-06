@@ -238,6 +238,37 @@ def _load_opportunity_changes(db_path: Path, *, since_hours: int = 24, limit: in
     return rows
 
 
+def _load_review_failures(db_path: Path, *, limit: int = 6) -> List[sqlite3.Row]:
+    if not db_path.exists():
+        return []
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, seed_url, org_name_hint, seed_source, error_type, error_message, last_attempted_at
+            FROM scan_failures
+            WHERE status = 'pending'
+            ORDER BY last_attempted_at DESC, id DESC
+            LIMIT ?
+            """,
+            (max(limit * 4, 20),),
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        rows = []
+    finally:
+        conn.close()
+    grouped: Dict[str, sqlite3.Row] = {}
+    for row in rows:
+        key = str(row["seed_url"] or "").strip()
+        if not key or key in grouped:
+            continue
+        grouped[key] = row
+        if len(grouped) >= limit:
+            break
+    return list(grouped.values())
+
+
 def _format_task_line(idx: int, row: sqlite3.Row) -> str:
     url = str(row["submission_url"] or row["website"] or "").strip()
     reason = str(row["priority_reason"] or "").strip()
@@ -265,11 +296,20 @@ def _format_change_line(idx: int, row: sqlite3.Row) -> str:
     return f"{idx}. {row['org_name']} | {row['change_type']} | {old_value} -> {new_value} | {url}"
 
 
+def _format_review_line(idx: int, row: sqlite3.Row) -> str:
+    ref = f"failure:{row['id']}"
+    org_name = str(row["org_name_hint"] or "").strip() or "-"
+    url = str(row["seed_url"] or "-").strip() or "-"
+    err = str(row["error_type"] or "-").strip() or "-"
+    return f"{idx}. {ref} | {org_name} | {err} | {url}"
+
+
 def build_ops_digest(db_path: Path, report_path: Path, submission_json_path: Path, *, mode: str = "morning") -> str:
     rows = _load_ops_rows(db_path)
     ready_task_rows = _load_submission_task_rows(db_path, submission_state="ready_to_submit", limit=6)
     followup_task_rows = _load_submission_task_rows(db_path, submission_state="follow_up_due", limit=6)
     opportunity_changes = _load_opportunity_changes(db_path, since_hours=24, limit=8)
+    review_failures = _load_review_failures(db_path, limit=6)
     submission_items = _sort_submission_items(load_submission_items(submission_json_path))
     apply_now_items = [
         item
@@ -279,7 +319,7 @@ def build_ops_digest(db_path: Path, report_path: Path, submission_json_path: Pat
     closed_items = [item for item in submission_items if str(item.get("status", "")).lower() == "closed"]
     speedrun_items = [item for item in submission_items if _is_speedrun_submission(item)]
 
-    if not rows and not submission_items and not ready_task_rows and not followup_task_rows and not opportunity_changes:
+    if not rows and not submission_items and not ready_task_rows and not followup_task_rows and not opportunity_changes and not review_failures:
         if not report_path.exists():
             return f"(missing) {report_path}"
         return "[VC OPS]\n" + read_excerpt(report_path, max_lines=50, max_chars=2200)
@@ -297,6 +337,7 @@ def build_ops_digest(db_path: Path, report_path: Path, submission_json_path: Pat
         f"- active outreach rows: {len(rows)}",
         f"- apply targets: {len(submission_items)}",
         f"- managed ready/follow-up tasks: {len(ready_task_rows) + len(followup_task_rows)}",
+        f"- review queue pending: {len(review_failures)}",
     ]
 
     if mode == "evening":
@@ -347,6 +388,13 @@ def build_ops_digest(db_path: Path, report_path: Path, submission_json_path: Pat
         else:
             out.append("- none")
 
+        out.extend(["", "review queue:"])
+        if review_failures:
+            for idx, row in enumerate(review_failures[:5], start=1):
+                out.append(_format_review_line(idx, row))
+        else:
+            out.append("- none")
+
         out.extend(["", "watchlist later:"])
         for idx, row in enumerate(by_bucket.get("this_week", [])[:5], start=1):
             out.append(_format_task_line(idx, row))
@@ -362,6 +410,7 @@ def build_ops_digest(db_path: Path, report_path: Path, submission_json_path: Pat
         ("ready to submit", ready_task_rows, 5),
         ("follow-up due", followup_task_rows, 5),
         ("closed / skip", closed_items, 4),
+        ("review queue", review_failures, 5),
         ("new speedrun / cohort", speedrun_items if speedrun_items else speedrun_rows, 5),
         ("no deadline / outreach", by_bucket.get("no_deadline", []), 6),
     ]
@@ -375,6 +424,9 @@ def build_ops_digest(db_path: Path, report_path: Path, submission_json_path: Pat
             elif isinstance(first, sqlite3.Row) and "submission_state" in first.keys():
                 for idx, row in enumerate(section_rows[:limit], start=1):
                     out.append(_format_managed_task_line(idx, row))
+            elif isinstance(first, sqlite3.Row) and "seed_url" in first.keys():
+                for idx, row in enumerate(section_rows[:limit], start=1):
+                    out.append(_format_review_line(idx, row))
             elif isinstance(first, sqlite3.Row):
                 for idx, row in enumerate(section_rows[:limit], start=1):
                     out.append(_format_task_line(idx, row))

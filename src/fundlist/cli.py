@@ -19,6 +19,8 @@ from .openclaw import openclaw_multi_command
 from .review_queue import review_queue_command
 from .submission_fallback import DEFAULT_FALLBACK_JSON, DEFAULT_FALLBACK_PROVIDER, DEFAULT_FALLBACK_REPORT, submission_fallback_command
 from .submission_finder import (
+    scan_failure_ignore_command,
+    scan_failure_resolve_command,
     scan_failures_command,
     submission_export_command,
     submission_list_command,
@@ -421,9 +423,17 @@ def build_parser() -> argparse.ArgumentParser:
     submission_export.set_defaults(func=submission_export_command)
 
     scan_failures = sub.add_parser("scan-failures", help="List unresolved or resolved submission scan failures")
-    scan_failures.add_argument("--status", default="pending", choices=["pending", "resolved", "all"])
+    scan_failures.add_argument("--status", default="pending", choices=["pending", "resolved", "ignored", "all"])
     scan_failures.add_argument("--limit", type=int, default=80)
     scan_failures.set_defaults(func=scan_failures_command)
+
+    scan_failure_resolve = sub.add_parser("scan-failure-resolve", help="Mark a scan failure as resolved")
+    scan_failure_resolve.add_argument("ref", help="failure:<id>, raw id, or seed URL")
+    scan_failure_resolve.set_defaults(func=scan_failure_resolve_command)
+
+    scan_failure_ignore = sub.add_parser("scan-failure-ignore", help="Ignore a scan failure")
+    scan_failure_ignore.add_argument("ref", help="failure:<id>, raw id, or seed URL")
+    scan_failure_ignore.set_defaults(func=scan_failure_ignore_command)
 
     submission_fallback = sub.add_parser("submission-fallback", help="Retry failed submission scans with search/AI fallback")
     submission_fallback.add_argument("--limit", type=int, default=20)

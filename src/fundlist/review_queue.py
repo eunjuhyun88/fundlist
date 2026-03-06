@@ -21,6 +21,7 @@ def _failure_rows(store: SubmissionStore, *, limit: int) -> List[Dict[str, objec
     for row in grouped.values():
         out.append(
             {
+                "ref": f"failure:{int(row['id'])}",
                 "queue_type": "scan_failure",
                 "review_reason": f"scan_{str(row['stage'] or '').strip().lower()}_failed",
                 "org_name": str(row["org_name_hint"] or "").strip(),
@@ -41,7 +42,7 @@ def _target_rows(store: SubmissionStore, *, limit: int) -> List[Dict[str, object
     store.conn.row_factory = sqlite3.Row
     cur = store.conn.execute(
         """
-        SELECT org_name, org_type, domain, source_url, submission_url, submission_type,
+        SELECT fingerprint, org_name, org_type, domain, source_url, submission_url, submission_type,
                status, deadline_text, deadline_date, score, last_checked_at
         FROM submission_targets
         WHERE submission_type = 'unknown'
@@ -71,6 +72,7 @@ def _target_rows(store: SubmissionStore, *, limit: int) -> List[Dict[str, object
             reason = "deadline_missing_date"
         out.append(
             {
+                "ref": f"target:{str(row['fingerprint'] or '').strip()}",
                 "queue_type": "target_review",
                 "review_reason": reason,
                 "org_name": str(row["org_name"] or "").strip(),
@@ -111,12 +113,13 @@ def review_queue_command(args: argparse.Namespace) -> int:
         return 0
 
     print(
-        "queue_type\treview_reason\torg_name\tstatus\tpriority_score\tofficial_page\tsubmission_url\tseed_source\terror_type\tlast_seen_at\tdetail"
+        "ref\tqueue_type\treview_reason\torg_name\tstatus\tpriority_score\tofficial_page\tsubmission_url\tseed_source\terror_type\tlast_seen_at\tdetail"
     )
     for row in rows:
         print(
             "\t".join(
                 [
+                    str(row["ref"]),
                     str(row["queue_type"]),
                     str(row["review_reason"]),
                     str(row["org_name"]),
