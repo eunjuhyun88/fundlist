@@ -235,6 +235,9 @@ class FundlistAPIHandler(BaseHTTPRequestHandler):
             if parts == ["v1", "scans", "delta"]:
                 self._handle_scan(body, full=False)
                 return
+            if parts == ["v1", "scans", "fallback"]:
+                self._handle_fallback_scan(body)
+                return
             self._write_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"})
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
@@ -479,6 +482,54 @@ class FundlistAPIHandler(BaseHTTPRequestHandler):
         payload = {
             "ok": proc.returncode == 0,
             "scan_type": "full" if full else "delta",
+            "returncode": proc.returncode,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+            "command": args[2:],
+        }
+        self._write_json(HTTPStatus.OK if proc.returncode == 0 else HTTPStatus.BAD_REQUEST, payload)
+
+    def _handle_fallback_scan(self, body: Dict[str, Any]) -> None:
+        seed_urls = _split_csv(body.get("seed_urls"))
+        args = [
+            sys.executable,
+            str(PROJECT_ROOT / "fundlist.py"),
+            "--db",
+            str(self.server.db_path),
+            "submission-fallback",
+        ]
+        if seed_urls:
+            args.extend(["--seed-urls", ",".join(seed_urls)])
+        for key, default, minimum, maximum in [
+            ("limit", 20, 1, 500),
+            ("max_results_per_query", 6, 1, 50),
+            ("max_candidates", 12, 1, 50),
+            ("max_candidate_scan", 4, 1, 20),
+            ("max_pages_per_site", 6, 1, 20),
+            ("http_timeout", 10, 1, 120),
+            ("min_score", 0, 0, 1000),
+            ("report_limit", 120, 1, 1000),
+            ("event_limit", 30, 0, 1000),
+        ]:
+            args.extend([f"--{key.replace('_', '-')}", str(_parse_int(body.get(key), default=default, minimum=minimum, maximum=maximum))])
+        for key in [
+            "ai_provider",
+            "model",
+            "status_filter",
+            "org_type_filter",
+            "output",
+            "json_output",
+            "refresh_submission_report",
+            "refresh_submission_json",
+        ]:
+            value = str(body.get(key) or "").strip()
+            if value:
+                args.extend([f"--{key.replace('_', '-')}", value])
+
+        proc = subprocess.run(args, capture_output=True, text=True, cwd=str(PROJECT_ROOT))
+        payload = {
+            "ok": proc.returncode == 0,
+            "scan_type": "fallback",
             "returncode": proc.returncode,
             "stdout": proc.stdout,
             "stderr": proc.stderr,

@@ -148,6 +148,33 @@ paths:
                     items:
                       $ref: '#/components/schemas/OpportunityChange'
                 required: [items]
+  /review-queue:
+    get:
+      tags: [changes]
+      summary: List items needing manual review
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 40
+      responses:
+        '200':
+          description: Review queue
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                  count:
+                    type: integer
+                required: [items, count]
   /tasks:
     get:
       tags: [tasks]
@@ -310,6 +337,39 @@ paths:
       responses:
         '202':
           description: Delta scan accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobResponse'
+  /scans/fallback:
+    post:
+      tags: [scans]
+      summary: Retry failed seeds with search and AI-assisted candidate selection
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                limit:
+                  type: integer
+                seed_urls:
+                  type: array
+                  items:
+                    type: string
+                ai_provider:
+                  type: string
+                  enum: [auto, groq, gemini, huggingface, openrouter]
+                max_results_per_query:
+                  type: integer
+                max_candidates:
+                  type: integer
+                max_candidate_scan:
+                  type: integer
+      responses:
+        '202':
+          description: Fallback scan accepted
           content:
             application/json:
               schema:
