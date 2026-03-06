@@ -352,6 +352,9 @@ class SubmissionStore:
         self.conn = sqlite3.connect(db_path)
         self._init_schema()
 
+    def close(self) -> None:
+        self.conn.close()
+
     def _init_schema(self) -> None:
         self.conn.execute(
             """
@@ -915,6 +918,22 @@ class SubmissionStore:
         args.append(limit)
         cur = self.conn.execute(sql, tuple(args))
         return cur.fetchall()
+
+    def get_target(self, fingerprint: str) -> Optional[sqlite3.Row]:
+        self.conn.row_factory = sqlite3.Row
+        cur = self.conn.execute(
+            """
+            SELECT id, org_name, org_type, domain, source_url, submission_url, submission_type,
+                   fingerprint, status, requirements, notes, evidence, source_page_snapshot,
+                   deadline_text, deadline_date, score,
+                   discovered_at, last_checked_at
+            FROM submission_targets
+            WHERE fingerprint = ?
+            LIMIT 1
+            """,
+            (fingerprint.strip(),),
+        )
+        return cur.fetchone()
 
     def list_events(self, *, limit: int = 40) -> List[sqlite3.Row]:
         self.conn.row_factory = sqlite3.Row

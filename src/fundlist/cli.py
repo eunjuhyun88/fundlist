@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from .api import api_serve_command
 from .collector import CollectorConfig, collect_from_sources, parse_csv_list
 from .changefeed import changes_list_command, changes_report_command
 from .fundraising import (
@@ -95,6 +96,8 @@ DEFAULT_VC_PROGRAM_REPORT_PATH = os.environ.get(
     "VC_PROGRAM_REPORT_PATH",
     str(PROJECT_ROOT / "data" / "reports" / "program_reports" / "alliance_dao_submission_report.md"),
 )
+DEFAULT_API_HOST = os.environ.get("FUNDLIST_API_HOST", "127.0.0.1")
+DEFAULT_API_PORT = int(os.environ.get("FUNDLIST_API_PORT", "8787"))
 
 
 def collect_command(args: argparse.Namespace) -> int:
@@ -511,6 +514,18 @@ def build_parser() -> argparse.ArgumentParser:
     task_followup.add_argument("--due-date", default="")
     task_followup.add_argument("--note", default="")
     task_followup.set_defaults(func=task_followup_command)
+
+    api_serve = sub.add_parser("api-serve", help="Serve dependency-free Phase 1 HTTP API")
+    api_serve.add_argument("--host", default=DEFAULT_API_HOST)
+    api_serve.add_argument("--port", type=int, default=DEFAULT_API_PORT)
+    api_serve.add_argument("--ops-report", default=DEFAULT_VC_OPS_REPORT_PATH)
+    api_serve.add_argument("--submission-report", default=DEFAULT_SUBMISSION_REPORT_PATH)
+    api_serve.add_argument(
+        "--submission-json",
+        default=str(PROJECT_ROOT / "data" / "reports" / "submission_targets.json"),
+    )
+    api_serve.add_argument("--api-token", default=os.environ.get("FUNDLIST_API_TOKEN", ""))
+    api_serve.set_defaults(func=api_serve_command)
 
     return parser
 
