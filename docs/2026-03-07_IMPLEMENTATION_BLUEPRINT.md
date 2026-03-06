@@ -880,3 +880,7 @@ Phase 2:
 를 순서대로 굳히는 작업이다.
 
 그리고 가장 먼저 만들 것은 `submission task layer`다.
+
+전체 milestone 순서와 완료 기준은 [2026-03-07_MASTER_EXECUTION_SPEC.md](./2026-03-07_MASTER_EXECUTION_SPEC.md)에 정리한다.
+
+Phase 1 API contract 초안은 [2026-03-07_OPENAPI_PHASE1.yaml](./2026-03-07_OPENAPI_PHASE1.yaml)에 정리한다.
