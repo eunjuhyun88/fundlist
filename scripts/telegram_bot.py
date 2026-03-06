@@ -188,6 +188,69 @@ def load_submission_items() -> List[Dict[str, Any]]:
     return [item for item in items if isinstance(item, dict)]
 
 
+def _local_time_text(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return "-"
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:  # noqa: BLE001
+        return raw
+    local = parsed.astimezone()
+    return local.strftime("%Y-%m-%d %H:%M %Z")
+
+
+def _compact_text(value: str, *, limit: int = 120) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if not text:
+        return "-"
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _deadline_display(item: Dict[str, Any]) -> str:
+    deadline_date = str(item.get("deadline_date") or "").strip()
+    deadline_text = _compact_text(str(item.get("deadline_text") or ""), limit=90)
+    status = str(item.get("status", "")).strip().lower()
+    if deadline_date:
+        return deadline_date
+    if status == "rolling":
+        return "rolling / 고정 마감일 미발견"
+    if status == "open":
+        return "공식 페이지에 명시된 마감일 없음"
+    if deadline_text != "-":
+        return deadline_text
+    if status == "closed":
+        return "closed"
+    return "미확인"
+
+
+def _evidence_display(item: Dict[str, Any]) -> str:
+    evidence = str(item.get("evidence") or "").strip().lower()
+    bits: List[str] = []
+    if "direct-form" in evidence:
+        bits.append("direct form")
+    if "typeform" in evidence:
+        bits.append("typeform")
+    if "airtable" in evidence:
+        bits.append("airtable")
+    if "docs.google.com/forms" in evidence or "forms.gle" in evidence:
+        bits.append("google form")
+    if "tally.so" in evidence:
+        bits.append("tally")
+    if "html:form" in evidence:
+        bits.append("page has form")
+    if "phrase:application form" in evidence:
+        bits.append("application form wording")
+    if "phrase:pitch us" in evidence:
+        bits.append("pitch us wording")
+    if not bits:
+        return _compact_text(evidence, limit=80)
+    deduped = list(dict.fromkeys(bits))
+    return ", ".join(deduped)
+
+
 def _submission_sort_key(item: Dict[str, Any]) -> Tuple[int, str, int, str]:
     status = str(item.get("status", "")).strip().lower()
     deadline = str(item.get("deadline_date") or "").strip()
@@ -210,13 +273,23 @@ def format_submission_subset(title: str, statuses: Sequence[str], *, limit: int 
     ordered = sorted(items, key=_submission_sort_key)[:limit]
     lines = [f"[{title}]", f"- generated: {now_utc_iso()}", f"- count: {len(items)}", ""]
     for idx, item in enumerate(ordered, start=1):
-        deadline = str(item.get("deadline_date") or item.get("deadline_text") or "-").strip() or "-"
+        deadline = _deadline_display(item)
         org = str(item.get("org_name", "-")).strip()
         status = str(item.get("status", "-")).strip()
         score = int(item.get("score", 0) or 0)
+        submission_type = str(item.get("submission_type", "-")).strip() or "-"
+        org_type = str(item.get("org_type", "-")).strip() or "-"
+        requirements = _compact_text(str(item.get("requirements") or ""), limit=100)
+        checked_at = _local_time_text(str(item.get("last_checked_at") or ""))
+        evidence = _evidence_display(item)
         official_page = str(item.get("source_url", "-")).strip() or "-"
         submit_url = str(item.get("submission_url", "-")).strip() or "-"
-        lines.append(f"{idx}. {org} | {status} | deadline={deadline} | score={score}")
+        lines.append(f"{idx}. {org}")
+        lines.append(f"   status: {status} | deadline: {deadline}")
+        lines.append(f"   type: {submission_type} | org_type: {org_type} | score: {score}")
+        lines.append(f"   checked: {checked_at}")
+        lines.append(f"   requirements: {requirements}")
+        lines.append(f"   evidence: {evidence}")
         lines.append(f"   official: {official_page}")
         lines.append(f"   apply: {submit_url}")
     return "\n".join(lines)
@@ -601,7 +674,41 @@ def help_hint(bot_username: str, chat_type: str, require_mention_in_group: bool)
             f"예: /help@{bot_username}\n"
             f"또는 @{bot_username} 이번주 VC 리드 5개 뽑아줘"
         )
-    return "명령은 /help 또는 /commands, 대화형은 질문 문장을 보내면 됩니다."
+    return "명령은 /help, /commands, /quickstart 중 하나를 쓰면 됩니다."
+
+
+def build_quickstart_text() -> str:
+    return "\n".join(
+        [
+            "[quickstart]",
+            "1. 전체 검증 돌리기",
+            "/submission_scan full",
+            "",
+            "2. 지금 바로 낼 수 있는 것 보기",
+            "/apply_open 10",
+            "",
+            "3. 마감 임박 보기",
+            "/apply_deadline 10",
+            "",
+            "4. 관심 항목 task 만들기",
+            "/task_create alliance dao",
+            "",
+            "5. 제출 직전으로 올리기",
+            "/task_ready <task-id>",
+            "",
+            "6. 제출 완료 처리",
+            "/task_submitted <task-id> submitted manually",
+            "",
+            "7. 최근 변경 보기",
+            "/changes_today 20",
+            "",
+            "더 자세한 설명:",
+            "/help ops",
+            "/help apply",
+            "/help tasks",
+            "/help review",
+        ]
+    )
 
 
 def build_help_text(
@@ -715,6 +822,35 @@ def build_help_text(
                 ]
             )
         )
+    if topic_key in {"review", "triage", "qa"}:
+        return (
+            prefix
+            + "\n".join(
+                [
+                    "[help: review]",
+                    "검수 루틴:",
+                    "1. /changes_today 20",
+                    "   최근 상태/링크 변경 확인",
+                    "2. /apply_open 20",
+                    "   실제 신청 가능한 항목 확인",
+                    "3. /apply_deadline 20",
+                    "   마감일 있는 항목 확인",
+                    "4. 이상한 항목은 공식 링크 직접 열어 확인",
+                    "5. 맞는 항목은 /task_create <query>",
+                    "",
+                    "이상 징후 예:",
+                    "- closed 인데 open 으로 보임",
+                    "- submission_url 이 공식 폼이 아님",
+                    "- deadline 이 비었거나 이상함",
+                    "- 같은 프로그램이 중복됨",
+                    "",
+                    "관련 명령:",
+                    "/changes_recent 7",
+                    "/submission_list 30",
+                    "/task_view <task-id>",
+                ]
+            )
+        )
     if topic_key in {"context", "memory"}:
         return (
             prefix
@@ -736,8 +872,9 @@ def build_help_text(
                 "",
                 "기본:",
                 "/status",
-                "/help <ops|apply|tasks|changes|context>",
+                "/help <ops|apply|tasks|changes|review|context>",
                 "/commands",
+                "/quickstart",
                 "",
                 "VC ops:",
                 "/ops_sync",
@@ -764,6 +901,8 @@ def build_help_text(
                 "예:",
                 "/help ops",
                 "/help apply",
+                "/help review",
+                "/quickstart",
                 "/submission_scan full",
                 "/task_create alliance dao",
             ]
@@ -810,6 +949,10 @@ def handle_command(
                 topic=arg,
             ),
         )
+        return
+
+    if cmd == "/quickstart":
+        client.send_message(chat_id, build_quickstart_text())
         return
 
     if cmd == "/status":
@@ -1236,7 +1379,7 @@ def handle_command(
         return
 
     if chat_type == "private":
-        client.send_message(chat_id, "unknown command. use /help or /help ops")
+        client.send_message(chat_id, "unknown command. use /help, /quickstart, or /help ops")
 
 
 def main() -> int:
