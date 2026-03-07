@@ -320,6 +320,35 @@ BAD_LINK_MARKERS = [
     "youtube",
 ]
 
+ASSET_URL_SUFFIXES = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".webp",
+    ".ico",
+    ".pdf",
+    ".mp4",
+    ".mov",
+    ".mp3",
+    ".zip",
+    ".gz",
+    ".json",
+)
+
+EVENT_RELEVANT_FIELDS = (
+    "org_name",
+    "org_type",
+    "source_url",
+    "submission_url",
+    "submission_type",
+    "status",
+    "deadline_text",
+    "deadline_date",
+    "requirements",
+)
+
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -891,7 +920,7 @@ class SubmissionStore:
                 event_type = "created" if old_row is None else "updated"
                 old_fingerprint = str(old_row["fingerprint"] or "") if old_row is not None else ""
 
-                if old_row is None or old_state != new_state:
+                if old_row is None or _has_meaningful_event_change(old_state, new_state):
                     self._insert_event(
                         fingerprint=target.fingerprint,
                         domain=target.domain,
@@ -1090,7 +1119,7 @@ class SubmissionStore:
         self.conn.row_factory = sqlite3.Row
         cur = self.conn.execute(
             """
-            SELECT id, domain, submission_url, event_type, before_json, after_json, detected_at
+            SELECT id, fingerprint, domain, submission_url, event_type, before_json, after_json, detected_at
             FROM submission_target_events
             ORDER BY detected_at DESC, id DESC
             LIMIT ?
@@ -1434,7 +1463,7 @@ class SubmissionStore:
             self.conn.row_factory = sqlite3.Row
             rows = self.conn.execute(
                 """
-                SELECT id, domain, submission_url, score, submission_type, status
+                SELECT id, domain, source_url, submission_url, score, submission_type, status
                 FROM submission_targets
                 ORDER BY last_checked_at DESC, id DESC
                 """
@@ -1474,7 +1503,10 @@ class SubmissionStore:
             seen: set[str] = set()
             root_count: Dict[str, int] = {}
             for row in ranked_rows:
+                source_url = _canonicalize_url(str(row["source_url"]).strip())
                 submission_url = _canonicalize_url(str(row["submission_url"]).strip())
+                if _is_noise_submission_url(submission_url) or _is_noise_submission_url(source_url):
+                    continue
                 is_form_target = bool(
                     submission_url and (_looks_actionable_form_url(submission_url) or _looks_form_host(submission_url))
                 )
@@ -1618,6 +1650,165 @@ def _is_generic_form_vendor_url(url: str) -> bool:
     if not lowered:
         return False
     return any(token in lowered for token in GENERIC_FORM_VENDOR_PATTERNS)
+
+
+def _is_probable_asset_url(url: str) -> bool:
+    canonical = _canonicalize_url(url)
+    if not canonical:
+        return False
+    parsed = urllib.parse.urlsplit(canonical)
+    domain = parsed.netloc.lower()
+    path_low = parsed.path.lower()
+    if domain.startswith("storage.") and "tally.so" in domain:
+        return True
+    return any(path_low.endswith(suffix) for suffix in ASSET_URL_SUFFIXES)
+
+
+def _is_noise_submission_url(url: str) -> bool:
+    canonical = _canonicalize_url(url)
+    if not canonical:
+        return False
+    if _is_probable_asset_url(canonical) or _is_generic_form_vendor_url(canonical):
+        return True
+    domain = _domain_key(canonical)
+    path = urllib.parse.urlsplit(canonical).path.lower().strip("/")
+    if "forms.gle" in domain and not path:
+        return True
+    return False
+
+
+def _has_meaningful_event_change(old_state: Dict[str, object], new_state: Dict[str, object]) -> bool:
+    if not old_state:
+        return True
+    for field in EVENT_RELEVANT_FIELDS:
+        old_value = str(old_state.get(field) or "").strip()
+        new_value = str(new_state.get(field) or "").strip()
+        if old_value != new_value:
+            return True
+    return False
+
+
+def _parse_event_state(raw_json: object) -> Dict[str, object]:
+    text = str(raw_json or "").strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _display_timestamp(raw_value: str) -> str:
+    text = str(raw_value or "").strip()
+    if not text:
+        return "-"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return text
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+
+
+def _render_event_summary(event_row: sqlite3.Row) -> str:
+    before = _parse_event_state(event_row["before_json"])
+    after = _parse_event_state(event_row["after_json"])
+    org_name = sanitize(str(after.get("org_name") or before.get("org_name") or event_row["domain"] or "Unknown"), limit=120)
+    source_url = str(after.get("source_url") or before.get("source_url") or "").strip()
+    submission_url = str(after.get("submission_url") or before.get("submission_url") or event_row["submission_url"] or "").strip()
+    primary_url = submission_url or source_url or "-"
+    if _is_noise_submission_url(primary_url) or _is_noise_submission_url(source_url):
+        return ""
+
+    timestamp = _display_timestamp(str(event_row["detected_at"] or ""))
+    event_type = str(event_row["event_type"] or "").strip().lower()
+    if event_type == "created":
+        deadline = _deadline_display(
+            status=str(after.get("status") or ""),
+            deadline_date=str(after.get("deadline_date") or ""),
+            deadline_text=str(after.get("deadline_text") or ""),
+        )
+        status = str(after.get("status") or "unknown").strip() or "unknown"
+        return f"- changed_at={timestamp} | {org_name} | new opportunity | status={status} | deadline={deadline} | {primary_url}"
+
+    if not _has_meaningful_event_change(before, after):
+        return ""
+
+    changes: List[str] = []
+    old_status = str(before.get("status") or "").strip()
+    new_status = str(after.get("status") or "").strip()
+    if old_status != new_status:
+        changes.append(f"status {old_status or '-'} -> {new_status or '-'}")
+
+    old_deadline_raw = str(before.get("deadline_date") or before.get("deadline_text") or "").strip()
+    new_deadline_raw = str(after.get("deadline_date") or after.get("deadline_text") or "").strip()
+    if old_deadline_raw != new_deadline_raw:
+        old_deadline = _deadline_display(
+            status=str(before.get("status") or ""),
+            deadline_date=str(before.get("deadline_date") or ""),
+            deadline_text=str(before.get("deadline_text") or ""),
+        )
+        new_deadline = _deadline_display(
+            status=str(after.get("status") or ""),
+            deadline_date=str(after.get("deadline_date") or ""),
+            deadline_text=str(after.get("deadline_text") or ""),
+        )
+        changes.append(f"deadline {old_deadline} -> {new_deadline}")
+
+    if str(before.get("submission_url") or "").strip() != str(after.get("submission_url") or "").strip():
+        changes.append("apply link updated")
+
+    if str(before.get("source_url") or "").strip() != str(after.get("source_url") or "").strip():
+        changes.append("official page updated")
+
+    old_name = str(before.get("org_name") or "").strip()
+    new_name = str(after.get("org_name") or "").strip()
+    if old_name != new_name and new_name:
+        changes.append(f"name {old_name or '-'} -> {new_name}")
+
+    old_submission_type = str(before.get("submission_type") or "").strip()
+    new_submission_type = str(after.get("submission_type") or "").strip()
+    if old_submission_type != new_submission_type:
+        changes.append(f"type {old_submission_type or '-'} -> {new_submission_type or '-'}")
+
+    if not changes:
+        return ""
+    return f"- changed_at={timestamp} | {org_name} | {'; '.join(changes[:3])} | {primary_url}"
+
+
+def _render_recent_event_summaries(events: Sequence[sqlite3.Row], *, allowed_urls: Optional[set[str]] = None) -> List[str]:
+    summaries: List[str] = []
+    seen: set[str] = set()
+    seen_fingerprints: set[str] = set()
+    seen_urls: set[str] = set()
+    for event_row in events:
+        fingerprint = str(event_row["fingerprint"] or "").strip()
+        if fingerprint and fingerprint in seen_fingerprints:
+            continue
+        before = _parse_event_state(event_row["before_json"])
+        after = _parse_event_state(event_row["after_json"])
+        primary_url = _canonicalize_url(
+            str(after.get("submission_url") or before.get("submission_url") or after.get("source_url") or before.get("source_url") or event_row["submission_url"] or "")
+        )
+        if allowed_urls is not None and primary_url and primary_url not in allowed_urls:
+            continue
+        if primary_url and primary_url in seen_urls:
+            continue
+        rendered = _render_event_summary(event_row)
+        if not rendered or rendered in seen:
+            continue
+        dedupe_key = " | ".join(rendered.split(" | ")[1:])
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        if fingerprint:
+            seen_fingerprints.add(fingerprint)
+        if primary_url:
+            seen_urls.add(primary_url)
+        summaries.append(rendered)
+    return summaries
 
 
 def _normalize_fundraise_seed_url(raw_url: str, *, category: str, status: str, notes: str) -> str:
@@ -1807,15 +1998,21 @@ def _looks_submission_link(url: str, text: str) -> bool:
 
 
 def _looks_form_host(url: str) -> bool:
-    domain = _domain_key(url)
+    canonical = _canonicalize_url(url)
+    if not canonical or _is_noise_submission_url(canonical):
+        return False
+    domain = _domain_key(canonical)
     if not domain:
         return False
     return any(marker in domain for marker in FORM_HOST_MARKERS)
 
 
 def _looks_actionable_form_url(url: str) -> bool:
-    domain = _domain_key(url)
-    path = urllib.parse.urlsplit(url).path.lower()
+    canonical = _canonicalize_url(url)
+    if not canonical or _is_noise_submission_url(canonical):
+        return False
+    domain = _domain_key(canonical)
+    path = urllib.parse.urlsplit(canonical).path.lower()
     if not domain:
         return False
     if "airtable.com" in domain:
@@ -1827,15 +2024,18 @@ def _looks_actionable_form_url(url: str) -> bool:
     if "docs.google.com" in domain:
         return "/forms/" in path and "/edit" not in path and "/viewanalytics" not in path
     if "forms.gle" in domain:
-        return True
+        return len(path.strip("/")) >= 5
     if "tally.so" in domain:
-        return path.startswith("/r/") or path.startswith("/forms/") or len(path.strip("/")) >= 4
+        slug = path.strip("/")
+        return path.startswith("/r/") or path.startswith("/forms/") or (len(slug) >= 4 and "." not in slug)
     if any(host in domain for host in ["jotform.com", "submittable.com", "fillout.com", "hubspot.com", "wkf.ms"]):
         return len(path.strip("/")) > 0
-    return _looks_form_host(url)
+    return _looks_form_host(canonical)
 
 
 def _score_submission_link(current_url: str, link_url: str, link_text: str) -> int:
+    if _is_noise_submission_url(link_url):
+        return -10
     merged = f"{link_url} {link_text}".lower()
     path_low = urllib.parse.urlsplit(link_url).path.lower()
     score = 0
@@ -1889,6 +2089,8 @@ def _pick_best_submission_url(current_url: str, html: str) -> Tuple[str, str, in
 
     for link_url, link_text in links:
         if not link_url:
+            continue
+        if _is_noise_submission_url(link_url):
             continue
         score = _score_submission_link(current_url, link_url, link_text)
         if score < 5:
@@ -2098,7 +2300,7 @@ def _evaluate_page(url: str, source_url: str, html: str, org_hint: str) -> Optio
     domain = _domain_key(url)
     if not _is_target_domain(domain):
         return None
-    if _is_generic_form_vendor_url(url):
+    if _is_noise_submission_url(url):
         return None
 
     path_hits = [hint for hint in STRONG_PATH_HINTS if hint in path_low]
@@ -2182,7 +2384,7 @@ def _evaluate_page(url: str, source_url: str, html: str, org_hint: str) -> Optio
     if status == "deadline":
         notes_parts.append("deadline-like wording detected")
     if deadline_text:
-        notes_parts.append(f"deadline: {deadline_text}")
+        notes_parts.append(f"deadline: {deadline_date or sanitize(deadline_text, limit=80)}")
     if intro_only:
         notes_parts.append("warm-intro/referral wording detected")
     if pitch_emails:
@@ -2198,7 +2400,7 @@ def _evaluate_page(url: str, source_url: str, html: str, org_hint: str) -> Optio
         submission_url, link_note, link_score = _pick_best_submission_url(url, html)
     if not submission_url:
         return None
-    if _is_generic_form_vendor_url(submission_url):
+    if _is_noise_submission_url(submission_url):
         return None
     submission_url_low = submission_url.lower()
     if org_type == "VC":
@@ -2663,6 +2865,18 @@ def _sort_rows_for_report(rows: Sequence[sqlite3.Row]) -> List[sqlite3.Row]:
 def _render_submission_report(rows: Sequence[sqlite3.Row], events: Sequence[sqlite3.Row]) -> str:
     lines: List[str] = []
     ordered_rows = _sort_rows_for_report(rows)
+    allowed_urls = {
+        _canonicalize_url(str(row["submission_url"] or ""))
+        for row in ordered_rows
+        if str(row["submission_url"] or "").strip()
+    }
+    allowed_urls.update(
+        _canonicalize_url(str(row["source_url"] or ""))
+        for row in ordered_rows
+        if str(row["source_url"] or "").strip()
+    )
+    allowed_urls.discard("")
+    recent_changes = _render_recent_event_summaries(events, allowed_urls=allowed_urls or None)
 
     lines.append("# VC Submission Targets")
     lines.append("")
@@ -2681,7 +2895,7 @@ def _render_submission_report(rows: Sequence[sqlite3.Row], events: Sequence[sqli
     lines.append(f"- total_targets: {total_targets}")
     lines.append(f"- high_priority(P0/P1): {high_priority_count}")
     lines.append(f"- status_breakdown: open={open_count}, rolling={rolling_count}, deadline={deadline_count}, closed={closed_count}")
-    lines.append(f"- recent_events: {len(events)}")
+    lines.append(f"- recent_changes: {len(recent_changes)}")
     lines.append("")
 
     if ordered_rows:
@@ -2726,11 +2940,11 @@ def _render_submission_report(rows: Sequence[sqlite3.Row], events: Sequence[sqli
                 )
             lines.append("")
 
-    if events:
+    if recent_changes:
         lines.append("## Recent Changes")
         lines.append("")
-        for e in events:
-            lines.append(f"- {e['detected_at']} | {e['event_type']} | {e['domain']} | {e['submission_url']}")
+        for line in recent_changes:
+            lines.append(line)
         lines.append("")
 
     lines.append("## Detailed Targets")
@@ -2748,11 +2962,11 @@ def _render_submission_report(rows: Sequence[sqlite3.Row], events: Sequence[sqli
         )
         lines.append(f"- score: {row['score']}")
         if row["requirements"]:
-            lines.append(f"- requirements: {row['requirements']}")
+            lines.append(f"- requirements: {sanitize(str(row['requirements']), limit=220)}")
         if row["notes"]:
-            lines.append(f"- notes: {row['notes']}")
+            lines.append(f"- notes: {sanitize(str(row['notes']), limit=220)}")
         if row["evidence"]:
-            lines.append(f"- evidence: {row['evidence']}")
+            lines.append(f"- evidence: {sanitize(str(row['evidence']), limit=220)}")
         if row["source_page_snapshot"]:
             lines.append(f"- source_page_snapshot: {sanitize(row['source_page_snapshot'], limit=260)}")
         lines.append(f"- last_checked_at: {row['last_checked_at']}")
