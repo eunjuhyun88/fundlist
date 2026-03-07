@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fundlist.local/schemas/fit-recommendation.schema.json",
+  "title": "FitRecommendation",
+  "type": "object",
+  "required": [
+    "opportunity_id",
+    "company_profile_id",
+    "fit_score",
+    "urgency_score",
+    "expected_value_score",
+    "overall_priority_score",
+    "why_fit",
+    "why_not_fit",
+    "recommended_ask",
+    "recommended_next_actions",
+    "confidence",
+    "evidence"
+  ],
+  "properties": {
+    "opportunity_id": {"type": "string"},
+    "company_profile_id": {"type": "string"},
+    "fit_score": {"type": "number"},
+    "urgency_score": {"type": "number"},
+    "expected_value_score": {"type": "number"},
+    "overall_priority_score": {"type": "number"},
+    "why_fit": {"type": "string"},
+    "why_not_fit": {"type": "string"},
+    "recommended_ask": {"type": "string"},
+    "recommended_next_actions": {"type": "array", "items": {"type": "string"}},
+    "recommended_materials": {"type": "array", "items": {"type": "string"}},
+    "risk_flags": {"type": "array", "items": {"type": "string"}},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "evidence": {"type": "array", "items": {"type": "object"}}
+  },
+  "additionalProperties": false
+}

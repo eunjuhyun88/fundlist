@@ -1362,3 +1362,5 @@ override도 별도 observation처럼 저장한다.
 `VC/Accelerator/Grant opportunity를 공식 페이지 기준으로 지속적으로 검증하고, 고객별 전략에 맞게 우선순위를 계산하며, 실제 제출 운영 상태까지 API와 push channel로 관리하는 operating system`
 
 실제 구현 순서와 자동화 경계는 [2026-03-07_AUTOMATION_SCOPE_AND_ROADMAP.md](./2026-03-07_AUTOMATION_SCOPE_AND_ROADMAP.md)에 정리한다.
+
+아키텍처 전환 이후 canonical entity/data model은 [2026-03-07_FUNDING_INTELLIGENCE_CANONICAL_SCHEMA.md](./2026-03-07_FUNDING_INTELLIGENCE_CANONICAL_SCHEMA.md), agent IO/runtime은 [2026-03-07_AGENT_RUNTIME_AND_IO_CONTRACTS.md](./2026-03-07_AGENT_RUNTIME_AND_IO_CONTRACTS.md), output DTO/UI contract는 [2026-03-07_OUTPUT_CONTRACTS_AND_EXPERIENCE_SPEC.md](./2026-03-07_OUTPUT_CONTRACTS_AND_EXPERIENCE_SPEC.md)를 기준으로 한다.

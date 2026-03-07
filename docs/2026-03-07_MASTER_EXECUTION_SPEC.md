@@ -512,3 +512,29 @@ multi-tenant API
 운영 실패/재시도/idempotency/review/webhook 계약:
 
 - [2026-03-07_RUNTIME_AND_FAILURE_SPEC.md](/Users/ej/Downloads/문서/VC_Fundraising/VC%20list/fundlist-git/docs/2026-03-07_RUNTIME_AND_FAILURE_SPEC.md)
+
+아키텍처 전환 기준:
+
+- [2026-03-07_FUNDING_INTELLIGENCE_CANONICAL_SCHEMA.md](/Users/ej/Downloads/문서/VC_Fundraising/VC%20list/fundlist-git/docs/2026-03-07_FUNDING_INTELLIGENCE_CANONICAL_SCHEMA.md)
+- [2026-03-07_AGENT_RUNTIME_AND_IO_CONTRACTS.md](/Users/ej/Downloads/문서/VC_Fundraising/VC%20list/fundlist-git/docs/2026-03-07_AGENT_RUNTIME_AND_IO_CONTRACTS.md)
+- [2026-03-07_OUTPUT_CONTRACTS_AND_EXPERIENCE_SPEC.md](/Users/ej/Downloads/문서/VC_Fundraising/VC%20list/fundlist-git/docs/2026-03-07_OUTPUT_CONTRACTS_AND_EXPERIENCE_SPEC.md)
+
+## 15. Architecture Pivot Note
+
+이 문서의 기존 milestone은 `submission scanner + operator workflow` 축에서 작성되었다.
+
+현재 목표는 그보다 상위인:
+
+- `organization intelligence`
+- `program intelligence`
+- `verified opportunities`
+- `fit recommendations`
+- `submission operations`
+
+을 포함하는 `AI-agent-first funding intelligence system`이다.
+
+따라서 앞으로의 구현 우선순위는 아래 문서를 기준으로 재설정한다.
+
+1. [2026-03-07_FUNDING_INTELLIGENCE_CANONICAL_SCHEMA.md](/Users/ej/Downloads/문서/VC_Fundraising/VC%20list/fundlist-git/docs/2026-03-07_FUNDING_INTELLIGENCE_CANONICAL_SCHEMA.md)
+2. [2026-03-07_AGENT_RUNTIME_AND_IO_CONTRACTS.md](/Users/ej/Downloads/문서/VC_Fundraising/VC%20list/fundlist-git/docs/2026-03-07_AGENT_RUNTIME_AND_IO_CONTRACTS.md)
+3. [2026-03-07_OUTPUT_CONTRACTS_AND_EXPERIENCE_SPEC.md](/Users/ej/Downloads/문서/VC_Fundraising/VC%20list/fundlist-git/docs/2026-03-07_OUTPUT_CONTRACTS_AND_EXPERIENCE_SPEC.md)

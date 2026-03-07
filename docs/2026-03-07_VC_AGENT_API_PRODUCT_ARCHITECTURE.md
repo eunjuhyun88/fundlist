@@ -634,3 +634,9 @@ API로 팔려면 SKU를 분리하는 게 맞다.
 다음 제품화 단계는 `workspace profile`, `priority engine`, `REST API`, `async worker`다.
 
 세부 API/데이터 모델/잡 설계는 [2026-03-07_VC_AGENT_API_DETAILED_SPEC.md](./2026-03-07_VC_AGENT_API_DETAILED_SPEC.md)에 정리한다.
+
+이후 canonical data model, agent runtime, output contract는 아래 문서를 기준으로 구체화한다.
+
+- [2026-03-07_FUNDING_INTELLIGENCE_CANONICAL_SCHEMA.md](./2026-03-07_FUNDING_INTELLIGENCE_CANONICAL_SCHEMA.md)
+- [2026-03-07_AGENT_RUNTIME_AND_IO_CONTRACTS.md](./2026-03-07_AGENT_RUNTIME_AND_IO_CONTRACTS.md)
+- [2026-03-07_OUTPUT_CONTRACTS_AND_EXPERIENCE_SPEC.md](./2026-03-07_OUTPUT_CONTRACTS_AND_EXPERIENCE_SPEC.md)

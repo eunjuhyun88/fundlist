@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fundlist.local/schemas/daily-brief.schema.json",
+  "title": "DailyBrief",
+  "type": "object",
+  "required": [
+    "generated_at",
+    "workspace_id",
+    "headline",
+    "top_actions",
+    "new_opportunities",
+    "deadline_alerts",
+    "changed_opportunities",
+    "ready_to_submit",
+    "review_needed"
+  ],
+  "properties": {
+    "generated_at": {"type": "string", "format": "date-time"},
+    "workspace_id": {"type": "string"},
+    "headline": {"type": "string"},
+    "top_actions": {"type": "array", "items": {"$ref": "opportunity-card.schema.json"}},
+    "new_opportunities": {"type": "array", "items": {"$ref": "opportunity-card.schema.json"}},
+    "deadline_alerts": {"type": "array", "items": {"$ref": "opportunity-card.schema.json"}},
+    "changed_opportunities": {"type": "array", "items": {"type": "object"}},
+    "ready_to_submit": {"type": "array", "items": {"type": "object"}},
+    "review_needed": {"type": "array", "items": {"type": "object"}}
+  },
+  "additionalProperties": false
+}

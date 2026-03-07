@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fundlist.local/schemas/organization-dossier.schema.json",
+  "title": "OrganizationDossier",
+  "type": "object",
+  "required": [
+    "organization_id",
+    "organization_name",
+    "organization_type",
+    "checked_at",
+    "focus_sectors",
+    "focus_stages",
+    "focus_geographies",
+    "fund_size_text",
+    "thesis_summary",
+    "investment_style",
+    "portfolio_examples",
+    "what_they_fund",
+    "confidence",
+    "evidence"
+  ],
+  "properties": {
+    "organization_id": {"type": "string"},
+    "organization_name": {"type": "string"},
+    "organization_type": {"type": "string"},
+    "official_domain": {"type": "string"},
+    "checked_at": {"type": "string", "format": "date-time"},
+    "focus_sectors": {"type": "array", "items": {"type": "string"}},
+    "focus_stages": {"type": "array", "items": {"type": "string"}},
+    "focus_geographies": {"type": "array", "items": {"type": "string"}},
+    "fund_size_text": {"type": "string"},
+    "check_size_range": {
+      "type": "object",
+      "required": ["min_usd", "max_usd"],
+      "properties": {
+        "min_usd": {"type": ["integer", "null"]},
+        "max_usd": {"type": ["integer", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "thesis_summary": {"type": "string"},
+    "investment_style": {"type": "string"},
+    "portfolio_examples": {"type": "array", "items": {"type": "string"}},
+    "what_they_fund": {"type": "string"},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "evidence": {"type": "array", "items": {"type": "object"}}
+  },
+  "additionalProperties": false
+}
