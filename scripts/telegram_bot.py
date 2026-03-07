@@ -5,13 +5,15 @@ import json
 import os
 import re
 import shlex
+import sqlite3
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 
@@ -27,7 +29,39 @@ DEFAULT_SUBMISSION_REPORT = ROOT / "data" / "reports" / "submission_targets_repo
 DEFAULT_SUBMISSION_JSON = ROOT / "data" / "reports" / "submission_targets.json"
 DEFAULT_FALLBACK_REPORT = ROOT / "data" / "reports" / "submission_fallback_report.md"
 DEFAULT_FALLBACK_JSON = ROOT / "data" / "reports" / "submission_fallback.json"
+DEFAULT_DB = ROOT / "data" / "investment_items.db"
 CHAT_HISTORY: Dict[int, Deque[Dict[str, str]]] = {}
+FUNDRAISE_CONTEXT_CACHE: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None
+
+NOISE_URL_SNIPPETS = (
+    "typeform.com/application-form-builder",
+    "typeform.com/explore",
+    "airtable.com/solutions/",
+    "storage.tally.so/",
+    "tally.so/support",
+    "refreshmiami.com/submit-an-event",
+    "businessjournaldaily.com/submit-your-story",
+    "statnews.com/pitch-guidelines",
+)
+
+GENERIC_HOSTS = {
+    "airtable.com",
+    "docs.google.com",
+    "forms.gle",
+    "tally.so",
+    "typeform.com",
+    "form.typeform.com",
+    "github.com",
+}
+
+GENERIC_ORG_NAMES = {
+    "airtable",
+    "forms",
+    "typeform",
+    "google forms",
+    "google form",
+    "tally",
+}
 
 
 def now_utc_iso() -> str:
@@ -178,17 +212,209 @@ def read_report(path: Path) -> str:
     return "\n".join(lines)
 
 
-def load_submission_items() -> List[Dict[str, Any]]:
+def _normalize_org_key(value: str) -> str:
+    return re.sub(r"[^0-9a-z]+", "", str(value or "").strip().lower())
+
+
+def _canonical_url(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("mailto:"):
+        return raw.lower()
+    try:
+        parsed = urllib.parse.urlparse(raw)
+    except Exception:  # noqa: BLE001
+        return raw.strip()
+    scheme = (parsed.scheme or "https").lower()
+    host = parsed.netloc.lower()
+    path = parsed.path or ""
+    if host.startswith("www."):
+        host = host[4:]
+    if path != "/" and path.endswith("/"):
+        path = path[:-1]
+    return urllib.parse.urlunparse((scheme, host, path, "", parsed.query, ""))
+
+
+def _root_domain(value: str) -> str:
+    url = _canonical_url(value)
+    if url.startswith("mailto:"):
+        return ""
+    try:
+        host = urllib.parse.urlparse(url).netloc.lower()
+    except Exception:  # noqa: BLE001
+        return ""
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def _is_noise_submission_url(value: str) -> bool:
+    url = _canonical_url(value)
+    if not url:
+        return True
+    lowered = url.lower()
+    if any(snippet in lowered for snippet in NOISE_URL_SNIPPETS):
+        return True
+    if lowered in {"https://forms.gle", "https://forms.gle/"}:
+        return True
+    try:
+        parsed = urllib.parse.urlparse(lowered)
+    except Exception:  # noqa: BLE001
+        return False
+    if parsed.netloc == "forms.gle" and parsed.path in {"", "/"}:
+        return True
+    if parsed.path.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")):
+        return True
+    return False
+
+
+def _extract_portfolio_examples(raw_json: str) -> str:
+    raw = str(raw_json or "").strip()
+    if not raw:
+        return ""
+    try:
+        payload = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    headers = payload.get("headers")
+    row = payload.get("row")
+    if not isinstance(headers, list) or not isinstance(row, list):
+        return ""
+    for idx, header in enumerate(headers):
+        key = str(header or "").strip().lower()
+        if not key:
+            continue
+        if any(
+            token in key
+            for token in (
+                "portfolio",
+                "투자 프로젝트",
+                "portfolio companies",
+                "investments",
+                "대표 포트폴리오",
+            )
+        ):
+            if idx >= len(row):
+                continue
+            value = _compact_text(str(row[idx] or ""), limit=140)
+            if value in {"-", "미지정", "확인된 투자 내역 없음"}:
+                return value
+            if value:
+                return value
+    return ""
+
+
+def _append_unique(target: List[str], value: str, *, limit: int = 4) -> None:
+    item = _compact_text(value, limit=160)
+    if item == "-" or not item or item in target:
+        return
+    if len(target) < limit:
+        target.append(item)
+
+
+def _load_fundraise_context() -> Dict[str, Dict[str, Dict[str, Any]]]:
+    global FUNDRAISE_CONTEXT_CACHE
+    if FUNDRAISE_CONTEXT_CACHE is not None:
+        return FUNDRAISE_CONTEXT_CACHE
+
+    cache: Dict[str, Dict[str, Dict[str, Any]]] = {"by_name": {}, "by_domain": {}}
+    if not DEFAULT_DB.exists():
+        FUNDRAISE_CONTEXT_CACHE = cache
+        return cache
+
+    conn = sqlite3.connect(str(DEFAULT_DB))
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT org_name, category, website, region, funding, notes, raw_json
+            FROM fundraising_records
+            ORDER BY imported_at DESC, id DESC
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    for row in rows:
+        name_key = _normalize_org_key(str(row["org_name"] or ""))
+        domain_key = _root_domain(str(row["website"] or ""))
+        portfolio_examples = _extract_portfolio_examples(str(row["raw_json"] or ""))
+
+        def upsert(slot_key: str, slot_value: str) -> None:
+            if not slot_value:
+                return
+            bucket = cache[slot_key].setdefault(
+                slot_value,
+                {
+                    "categories": [],
+                    "regions": [],
+                    "fundings": [],
+                    "notes": [],
+                    "websites": [],
+                    "portfolio_examples": [],
+                },
+            )
+            _append_unique(bucket["categories"], str(row["category"] or ""))
+            _append_unique(bucket["regions"], str(row["region"] or ""))
+            _append_unique(bucket["fundings"], str(row["funding"] or ""))
+            _append_unique(bucket["notes"], str(row["notes"] or ""), limit=6)
+            _append_unique(bucket["websites"], str(row["website"] or ""))
+            _append_unique(bucket["portfolio_examples"], portfolio_examples)
+
+        upsert("by_name", name_key)
+        upsert("by_domain", domain_key)
+
+    FUNDRAISE_CONTEXT_CACHE = cache
+    return cache
+
+
+def _context_for_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    cache = _load_fundraise_context()
+    name_key = _normalize_org_key(str(item.get("org_name") or ""))
+    domain_key = _root_domain(str(item.get("source_url") or "")) or _root_domain(str(item.get("submission_url") or ""))
+    merged: Dict[str, List[str]] = {
+        "categories": [],
+        "regions": [],
+        "fundings": [],
+        "notes": [],
+        "websites": [],
+        "portfolio_examples": [],
+    }
+    candidate_sources = [cache["by_name"].get(name_key)]
+    if domain_key and domain_key not in GENERIC_HOSTS:
+        candidate_sources.append(cache["by_domain"].get(domain_key))
+    for source in candidate_sources:
+        if not source:
+            continue
+        for key, values in source.items():
+            for value in values:
+                _append_unique(merged[key], value, limit=6)
+    return {
+        "category": merged["categories"][0] if merged["categories"] else "",
+        "categories": merged["categories"],
+        "region": merged["regions"][0] if merged["regions"] else "",
+        "regions": merged["regions"],
+        "funding": merged["fundings"][0] if merged["fundings"] else "",
+        "fundings": merged["fundings"],
+        "notes": merged["notes"],
+        "website": merged["websites"][0] if merged["websites"] else "",
+        "portfolio_examples": merged["portfolio_examples"],
+    }
+
+
+def load_submission_payload() -> Dict[str, Any]:
     if not DEFAULT_SUBMISSION_JSON.exists():
-        return []
+        return {}
     try:
         payload = json.loads(DEFAULT_SUBMISSION_JSON.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
-        return []
-    items = payload.get("items", [])
-    if not isinstance(items, list):
-        return []
-    return [item for item in items if isinstance(item, dict)]
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return payload
 
 
 def _local_time_text(value: str) -> str:
@@ -254,6 +480,215 @@ def _evidence_display(item: Dict[str, Any]) -> str:
     return ", ".join(deduped)
 
 
+def _parse_iso_datetime(value: str) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _parse_deadline_date(value: str) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _days_left_text(item: Dict[str, Any]) -> str:
+    deadline = _parse_deadline_date(str(item.get("deadline_date") or ""))
+    if deadline is None:
+        return "미확인"
+    today = datetime.now().astimezone().date()
+    remaining = (deadline.date() - today).days
+    if remaining > 0:
+        return f"D-{remaining}"
+    if remaining == 0:
+        return "D-Day"
+    return f"D+{abs(remaining)}"
+
+
+def _extract_money_snippet(values: Sequence[str]) -> str:
+    for value in values:
+        text = _compact_text(value, limit=120)
+        if text == "-":
+            continue
+        if re.search(r"[$€£₩]\s?\d", text) or re.search(r"\b\d+(\.\d+)?\s?(m|bn|k)\b", text, re.IGNORECASE):
+            return text
+    return "-"
+
+
+def _derive_focus(item: Dict[str, Any], context: Dict[str, Any]) -> str:
+    corpus_parts = [
+        str(item.get("org_type") or ""),
+        str(item.get("org_name") or ""),
+        str(item.get("notes") or ""),
+        str(item.get("source_page_snapshot") or ""),
+        str(item.get("requirements") or ""),
+        " ".join(context.get("categories", [])),
+        " ".join(context.get("regions", [])),
+        " ".join(context.get("notes", [])),
+    ]
+    corpus = " ".join(part for part in corpus_parts if part).lower()
+    tags: List[str] = []
+    if "ai" in corpus or "genai" in corpus or "llm" in corpus:
+        tags.append("AI")
+    if any(token in corpus for token in ("web3", "crypto", "blockchain", "defi", "onchain", "zk", "l2")):
+        tags.append("Web3/Crypto")
+    if "fintech" in corpus:
+        tags.append("Fintech")
+    if any(token in corpus for token in ("infra", "developer", "devtool", "tooling", "platform", "cloud")):
+        tags.append("Infra/Devtools")
+    if "accelerator" in corpus:
+        tags.append("Accelerator")
+    if "grant" in corpus:
+        tags.append("Grant")
+    if str(item.get("org_type") or "").strip() == "VC":
+        tags.append("VC")
+    for region_value in context.get("regions", []):
+        region_token = str(region_value or "").strip()
+        region_lower = region_token.lower()
+        if any(token in region_lower for token in ("web2", "web3", "crypto", "ai", "fintech", "infra", "consumer", "enterprise")) and region_token not in tags and len(tags) < 4:
+            tags.append(region_token)
+    if not tags and context.get("category"):
+        tags.append(_compact_text(str(context["category"]), limit=40))
+    if not tags:
+        tags.append(str(item.get("org_type") or "미확인"))
+    deduped = list(dict.fromkeys(tag for tag in tags if tag and tag != "-"))
+    return ", ".join(deduped[:4]) if deduped else "미확인"
+
+
+def _portfolio_display(item: Dict[str, Any], context: Dict[str, Any]) -> str:
+    values = list(context.get("portfolio_examples", []))
+    note_candidates = list(context.get("notes", []))
+    for text in note_candidates:
+        compact = _compact_text(text, limit=140)
+        if compact in {"-", ""}:
+            continue
+        if "확인된 투자 내역 없음" in compact:
+            return "확인된 투자 내역 없음"
+        lowered = compact.lower()
+        if "deadline:" in lowered or "title:" in lowered:
+            continue
+        if any(token in lowered for token in ("portfolio", "invested", "투자")):
+            values.append(compact)
+    for value in values:
+        compact = _compact_text(value, limit=140)
+        if compact and compact != "-":
+            return compact
+    return "미확인"
+
+
+def _is_stale_action_target(item: Dict[str, Any]) -> bool:
+    deadline = _parse_deadline_date(str(item.get("deadline_date") or ""))
+    if deadline is not None:
+        if (deadline.date() - datetime.now().astimezone().date()).days < -30:
+            return True
+    evidence = str(item.get("evidence") or "").lower()
+    primary_url = _canonical_url(str(item.get("submission_url") or item.get("source_url") or ""))
+    if not primary_url:
+        return True
+    lowered = primary_url.lower()
+    if any(token in lowered for token in ("/blog/", "/articles/", "/news/", "/newsroom/")) and not any(
+        token in evidence for token in ("direct-form", "typeform", "airtable", "docs.google.com/forms", "tally.so", "phrase:application form", "phrase:pitch us")
+    ):
+        return True
+    return False
+
+
+def _status_rank(value: str) -> int:
+    lowered = str(value or "").strip().lower()
+    return {
+        "deadline": 4,
+        "open": 3,
+        "rolling": 2,
+        "closed": 1,
+    }.get(lowered, 0)
+
+
+def _normalize_submission_item(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    normalized = dict(item)
+    org_name = str(item.get("org_name") or "").strip()
+    if org_name.lower() in GENERIC_ORG_NAMES:
+        return None
+    submit_url = _canonical_url(str(item.get("submission_url") or ""))
+    source_url = _canonical_url(str(item.get("source_url") or ""))
+    primary_url = submit_url or source_url
+    if _is_noise_submission_url(primary_url):
+        return None
+
+    status = str(item.get("status") or "").strip().lower()
+    if submit_url.endswith("/closedform") or source_url.endswith("/closedform"):
+        status = "closed"
+
+    context = _context_for_item(item)
+    checked_at = _parse_iso_datetime(str(item.get("last_checked_at") or ""))
+    deadline_date = str(item.get("deadline_date") or "").strip()
+    deadline_display = _deadline_display({**item, "status": status, "deadline_date": deadline_date})
+    money_display = _extract_money_snippet(
+        [
+            str(context.get("funding") or ""),
+            str(item.get("notes") or ""),
+            str(item.get("source_page_snapshot") or ""),
+        ]
+    )
+
+    normalized.update(
+        {
+            "status": status,
+            "submission_url": submit_url or str(item.get("submission_url") or ""),
+            "source_url": source_url or str(item.get("source_url") or ""),
+            "checked_at_display": _local_time_text(str(item.get("last_checked_at") or "")),
+            "checked_at_dt": checked_at,
+            "deadline_display": deadline_display,
+            "days_left_display": _days_left_text(item),
+            "focus_display": _derive_focus(item, context),
+            "capital_display": money_display,
+            "portfolio_display": _portfolio_display(item, context),
+            "region_display": _compact_text(str(context.get("region") or ""), limit=60),
+            "context_category": _compact_text(str(context.get("category") or ""), limit=60),
+            "evidence_display": _evidence_display(item),
+            "requirements_display": _compact_text(str(item.get("requirements") or ""), limit=120),
+            "org_type_display": _compact_text(str(item.get("org_type") or context.get("category") or "미확인"), limit=40),
+        }
+    )
+    return normalized
+
+
+def load_submission_items() -> List[Dict[str, Any]]:
+    payload = load_submission_payload()
+    items = payload.get("items", [])
+    if not isinstance(items, list):
+        return []
+
+    deduped: Dict[str, Dict[str, Any]] = {}
+    for raw_item in items:
+        if not isinstance(raw_item, dict):
+            continue
+        item = _normalize_submission_item(raw_item)
+        if not item:
+            continue
+        dedupe_key = _canonical_url(str(item.get("submission_url") or "")) or _normalize_org_key(str(item.get("org_name") or ""))
+        if not dedupe_key:
+            continue
+        existing = deduped.get(dedupe_key)
+        if existing is None:
+            deduped[dedupe_key] = item
+            continue
+        existing_checked = existing.get("checked_at_dt") or datetime.min.replace(tzinfo=timezone.utc)
+        item_checked = item.get("checked_at_dt") or datetime.min.replace(tzinfo=timezone.utc)
+        existing_key = (_status_rank(existing.get("status")), int(existing.get("score", 0) or 0), existing_checked)
+        candidate_key = (_status_rank(item.get("status")), int(item.get("score", 0) or 0), item_checked)
+        if candidate_key > existing_key:
+            deduped[dedupe_key] = item
+    return list(deduped.values())
+
+
 def _submission_sort_key(item: Dict[str, Any]) -> Tuple[int, str, int, str]:
     status = str(item.get("status", "")).strip().lower()
     deadline = str(item.get("deadline_date") or "").strip()
@@ -270,32 +705,84 @@ def _submission_sort_key(item: Dict[str, Any]) -> Tuple[int, str, int, str]:
 def format_submission_subset(title: str, statuses: Sequence[str], *, limit: int = 12) -> str:
     wanted = {s.strip().lower() for s in statuses if s.strip()}
     items = [item for item in load_submission_items() if str(item.get("status", "")).strip().lower() in wanted]
+    if wanted & {"open", "rolling", "deadline"}:
+        items = [item for item in items if not _is_stale_action_target(item)]
     if not items:
         return f"[{title}]\n- none"
 
+    payload = load_submission_payload()
+    generated_at = _local_time_text(str(payload.get("generated_at") or ""))
     ordered = sorted(items, key=_submission_sort_key)[:limit]
-    lines = [f"[{title}]", f"- generated: {now_utc_iso()}", f"- count: {len(items)}", ""]
+    lines = [f"[{title}]", f"- generated: {generated_at}", f"- count: {len(items)}", ""]
     for idx, item in enumerate(ordered, start=1):
-        deadline = _deadline_display(item)
         org = str(item.get("org_name", "-")).strip()
         status = str(item.get("status", "-")).strip()
         score = int(item.get("score", 0) or 0)
         submission_type = str(item.get("submission_type", "-")).strip() or "-"
-        org_type = str(item.get("org_type", "-")).strip() or "-"
-        requirements = _compact_text(str(item.get("requirements") or ""), limit=100)
-        checked_at = _local_time_text(str(item.get("last_checked_at") or ""))
-        evidence = _evidence_display(item)
+        org_type = str(item.get("org_type_display", "-")).strip() or "-"
+        requirements = str(item.get("requirements_display", "-")).strip() or "-"
+        checked_at = str(item.get("checked_at_display", "-")).strip() or "-"
+        evidence = str(item.get("evidence_display", "-")).strip() or "-"
         official_page = str(item.get("source_url", "-")).strip() or "-"
         submit_url = str(item.get("submission_url", "-")).strip() or "-"
+        deadline = str(item.get("deadline_display", "미확인")).strip() or "미확인"
+        days_left = str(item.get("days_left_display", "미확인")).strip() or "미확인"
+        focus = str(item.get("focus_display", "미확인")).strip() or "미확인"
+        capital = str(item.get("capital_display", "미확인")).strip() or "미확인"
+        portfolio = str(item.get("portfolio_display", "미확인")).strip() or "미확인"
+        region = str(item.get("region_display", "미확인")).strip() or "미확인"
         lines.append(f"{idx}. {org}")
-        lines.append(f"   status: {status} | deadline: {deadline}")
-        lines.append(f"   type: {submission_type} | org_type: {org_type} | score: {score}")
-        lines.append(f"   checked: {checked_at}")
+        lines.append(f"   status: {status} | checked: {checked_at}")
+        lines.append(f"   deadline: {deadline} | days_left: {days_left}")
+        lines.append(f"   focus: {focus} | org_type: {org_type}")
+        lines.append(f"   capital/fund_size: {capital} | region/track: {region}")
+        lines.append(f"   submission: {submission_type} | score: {score}")
+        lines.append(f"   portfolio/examples: {portfolio}")
         lines.append(f"   requirements: {requirements}")
         lines.append(f"   evidence: {evidence}")
         lines.append(f"   official: {official_page}")
         lines.append(f"   apply: {submit_url}")
     return "\n".join(lines)
+
+
+def _parse_json_output(output: str) -> Optional[Dict[str, Any]]:
+    raw = str(output or "").strip()
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def format_submission_scan_summary(title: str, code: int, output: str, *, full_sweep: bool) -> str:
+    payload = _parse_json_output(output)
+    if code != 0 or payload is None:
+        return format_command_result(title, code, output, max_lines=40)
+
+    summary = payload.get("summary", {}) if isinstance(payload.get("summary"), dict) else {}
+    artifacts = payload.get("artifacts", {}) if isinstance(payload.get("artifacts"), dict) else {}
+    lines = [
+        f"[{title.upper()}]",
+        f"- searched_at: {_local_time_text(str(payload.get('generated_at') or ''))}",
+        f"- mode: {'full sweep' if full_sweep else 'targeted scan'}",
+        f"- seeds(raw/deduped): {summary.get('raw_seed_count', 0)}/{summary.get('deduped_seed_count', 0)}",
+        f"- scanned: {summary.get('scanned', 0)} | found: {summary.get('found', 0)} | changed: {summary.get('changed', 0)}",
+        f"- failures: {summary.get('failures', 0)} | resolved_failures: {summary.get('resolved_failures', 0)}",
+        f"- report_json: {artifacts.get('json_output_path') or '-'}",
+    ]
+    return "\n".join(lines)
+
+
+def format_submission_scan_digest(title: str, code: int, output: str, *, full_sweep: bool) -> str:
+    sections = [format_submission_scan_summary(title, code, output, full_sweep=full_sweep)]
+    if code == 0:
+        sections.append("")
+        sections.append(format_submission_subset("TOP DEADLINES", ["deadline"], limit=8))
+        sections.append("")
+        sections.append(format_submission_subset("TOP OPEN / ROLLING", ["open", "rolling"], limit=8))
+    return "\n".join(sections)
 
 
 def parse_bool_env(name: str, default: str = "0") -> bool:
@@ -1294,12 +1781,16 @@ def handle_command(
         full_sweep = raw_arg.lower() in {"full", "daily", "seed"}
         run_cmd = fundlist + [
             "submission-scan",
-                    "--max-pages-per-site",
-                    os.environ.get("VC_SUBMISSION_MAX_PAGES", "6"),
-                    "--output",
-                    str(DEFAULT_SUBMISSION_REPORT),
-                    "--json-output",
-                    str(DEFAULT_SUBMISSION_JSON),
+            "--max-pages-per-site",
+            os.environ.get("VC_SUBMISSION_MAX_PAGES", "6"),
+            "--output",
+            str(DEFAULT_SUBMISSION_REPORT),
+            "--json-output",
+            str(DEFAULT_SUBMISSION_JSON),
+            "--stdout-format",
+            "json",
+            "--stdout-fields",
+            "summary,artifacts,recent_changes",
         ]
         if full_sweep:
             run_cmd.extend(
@@ -1333,8 +1824,7 @@ def handle_command(
             if raw_arg:
                 run_cmd.extend(["--query", raw_arg])
         code, out = run_local_command(run_cmd, timeout_sec=1200)
-        msg = [format_command_result("submission-scan", code, out, max_lines=50), "", read_report(DEFAULT_SUBMISSION_REPORT)]
-        client.send_message(chat_id, "\n".join(msg))
+        client.send_message(chat_id, format_submission_scan_digest("submission-scan", code, out, full_sweep=full_sweep))
         return
 
     if cmd == "/scan_failures":
@@ -1368,10 +1858,13 @@ def handle_command(
             str(DEFAULT_SUBMISSION_REPORT),
             "--json-output",
             str(DEFAULT_SUBMISSION_JSON),
+            "--stdout-format",
+            "json",
+            "--stdout-fields",
+            "summary,artifacts,recent_changes",
         ]
         code, out = run_local_command(run_cmd, timeout_sec=1200)
-        msg = [format_command_result("retry-failed", code, out, max_lines=50), "", read_report(DEFAULT_SUBMISSION_REPORT)]
-        client.send_message(chat_id, "\n".join(msg))
+        client.send_message(chat_id, format_submission_scan_digest("retry-failed", code, out, full_sweep=False))
         return
 
     if cmd == "/retry_unknown":
@@ -1395,10 +1888,13 @@ def handle_command(
             str(DEFAULT_SUBMISSION_REPORT),
             "--json-output",
             str(DEFAULT_SUBMISSION_JSON),
+            "--stdout-format",
+            "json",
+            "--stdout-fields",
+            "summary,artifacts,recent_changes",
         ]
         code, out = run_local_command(run_cmd, timeout_sec=1200)
-        msg = [format_command_result("retry-unknown", code, out, max_lines=50), "", read_report(DEFAULT_SUBMISSION_REPORT)]
-        client.send_message(chat_id, "\n".join(msg))
+        client.send_message(chat_id, format_submission_scan_digest("retry-unknown", code, out, full_sweep=False))
         return
 
     if cmd == "/retry_failed_ai":
@@ -1419,8 +1915,17 @@ def handle_command(
             str(DEFAULT_SUBMISSION_JSON),
         ]
         code, out = run_local_command(run_cmd, timeout_sec=1200)
-        msg = [format_command_result("retry-failed-ai", code, out, max_lines=50), "", read_report(DEFAULT_FALLBACK_REPORT)]
-        client.send_message(chat_id, "\n".join(msg))
+        sections = [format_command_result("retry-failed-ai", code, out, max_lines=30)]
+        if code == 0:
+            sections.extend(
+                [
+                    "",
+                    format_submission_subset("TOP DEADLINES", ["deadline"], limit=8),
+                    "",
+                    format_submission_subset("TOP OPEN / ROLLING", ["open", "rolling"], limit=8),
+                ]
+            )
+        client.send_message(chat_id, "\n".join(sections))
         return
 
     if cmd == "/review_queue":
@@ -1583,8 +2088,19 @@ def handle_command(
             str(DEFAULT_SUBMISSION_REPORT),
         ]
         code, out = run_local_command(run_cmd, timeout_sec=180)
-        msg = [format_command_result("submission-report", code, out, max_lines=30), "", read_report(DEFAULT_SUBMISSION_REPORT)]
-        client.send_message(chat_id, "\n".join(msg))
+        sections = [format_command_result("submission-report", code, out, max_lines=20)]
+        if code == 0:
+            sections.extend(
+                [
+                    "",
+                    format_submission_subset("TOP DEADLINES", ["deadline"], limit=12),
+                    "",
+                    format_submission_subset("TOP OPEN / ROLLING", ["open", "rolling"], limit=12),
+                    "",
+                    format_submission_subset("RECENTLY CLOSED", ["closed"], limit=6),
+                ]
+            )
+        client.send_message(chat_id, "\n".join(sections))
         return
 
     if cmd == "/submission_export":
