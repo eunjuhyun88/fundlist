@@ -13,11 +13,21 @@ OUT_LOG="$RUN_DIR/.context/telegram_stdout.log"
 mkdir -p "$PLIST_DIR" "$REPO_DIR/.context"
 mkdir -p "$RUN_DIR"
 if command -v rsync >/dev/null 2>&1; then
-  rsync -a --delete --exclude '.git/' "$REPO_DIR/" "$RUN_DIR/"
+  rsync -a --delete \
+    --exclude '.git/' \
+    --exclude '.context/' \
+    --exclude 'data/' \
+    "$REPO_DIR/" "$RUN_DIR/"
 else
-  rm -rf "$RUN_DIR"
-  mkdir -p "$RUN_DIR"
-  cp -R "$REPO_DIR/." "$RUN_DIR/"
+  find "$RUN_DIR" -mindepth 1 -maxdepth 1 \
+    ! -name '.context' \
+    ! -name 'data' \
+    -exec rm -rf {} +
+  find "$REPO_DIR" -mindepth 1 -maxdepth 1 \
+    ! -name '.git' \
+    ! -name '.context' \
+    ! -name 'data' \
+    -exec cp -R {} "$RUN_DIR/" \;
 fi
 
 cat > "$PLIST_PATH" <<EOF

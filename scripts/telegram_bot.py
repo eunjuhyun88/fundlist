@@ -32,6 +32,7 @@ DEFAULT_FALLBACK_JSON = ROOT / "data" / "reports" / "submission_fallback.json"
 DEFAULT_DB = ROOT / "data" / "investment_items.db"
 CHAT_HISTORY: Dict[int, Deque[Dict[str, str]]] = {}
 FUNDRAISE_CONTEXT_CACHE: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None
+STRUCTURED_SCAN_SUPPORT_CACHE: Optional[bool] = None
 
 NOISE_URL_SNIPPETS = (
     "typeform.com/application-form-builder",
@@ -194,6 +195,15 @@ def format_command_result(name: str, code: int, output: str, max_lines: int = 60
         lines = lines[: max_lines // 2] + ["... (truncated) ..."] + lines[-(max_lines // 2) :]
     body = "\n".join(lines) if lines else "(no output)"
     return f"[{name}] exit={code}\n{body}"
+
+
+def supports_structured_submission_scan(py_bin: str) -> bool:
+    global STRUCTURED_SCAN_SUPPORT_CACHE
+    if STRUCTURED_SCAN_SUPPORT_CACHE is not None:
+        return STRUCTURED_SCAN_SUPPORT_CACHE
+    code, out = run_local_command([py_bin, str(ROOT / "fundlist.py"), "submission-scan", "--help"], timeout_sec=30)
+    STRUCTURED_SCAN_SUPPORT_CACHE = code == 0 and "--stdout-format" in out
+    return bool(STRUCTURED_SCAN_SUPPORT_CACHE)
 
 
 def program_slug(value: str) -> str:
@@ -1529,6 +1539,7 @@ def handle_command(
     py = sys.executable or "/usr/bin/python3"
     fundlist = [py, str(ROOT / "fundlist.py")]
     context_ctl = [py, str(ROOT / "scripts" / "context_ctl.py")]
+    structured_submission_scan = supports_structured_submission_scan(py)
 
     if cmd in {"/start", "/help", "/commands"}:
         client.send_message(
@@ -1787,11 +1798,9 @@ def handle_command(
             str(DEFAULT_SUBMISSION_REPORT),
             "--json-output",
             str(DEFAULT_SUBMISSION_JSON),
-            "--stdout-format",
-            "json",
-            "--stdout-fields",
-            "summary,artifacts,recent_changes",
         ]
+        if structured_submission_scan:
+            run_cmd.extend(["--stdout-format", "json", "--stdout-fields", "summary,artifacts,recent_changes"])
         if full_sweep:
             run_cmd.extend(
                 [
@@ -1824,7 +1833,13 @@ def handle_command(
             if raw_arg:
                 run_cmd.extend(["--query", raw_arg])
         code, out = run_local_command(run_cmd, timeout_sec=1200)
-        client.send_message(chat_id, format_submission_scan_digest("submission-scan", code, out, full_sweep=full_sweep))
+        if structured_submission_scan:
+            client.send_message(chat_id, format_submission_scan_digest("submission-scan", code, out, full_sweep=full_sweep))
+        else:
+            sections = [format_command_result("submission-scan", code, out, max_lines=20)]
+            if code == 0:
+                sections.extend(["", format_submission_subset("TOP DEADLINES", ["deadline"], limit=8), "", format_submission_subset("TOP OPEN / ROLLING", ["open", "rolling"], limit=8)])
+            client.send_message(chat_id, "\n".join(sections))
         return
 
     if cmd == "/scan_failures":
@@ -1858,13 +1873,17 @@ def handle_command(
             str(DEFAULT_SUBMISSION_REPORT),
             "--json-output",
             str(DEFAULT_SUBMISSION_JSON),
-            "--stdout-format",
-            "json",
-            "--stdout-fields",
-            "summary,artifacts,recent_changes",
         ]
+        if structured_submission_scan:
+            run_cmd.extend(["--stdout-format", "json", "--stdout-fields", "summary,artifacts,recent_changes"])
         code, out = run_local_command(run_cmd, timeout_sec=1200)
-        client.send_message(chat_id, format_submission_scan_digest("retry-failed", code, out, full_sweep=False))
+        if structured_submission_scan:
+            client.send_message(chat_id, format_submission_scan_digest("retry-failed", code, out, full_sweep=False))
+        else:
+            sections = [format_command_result("retry-failed", code, out, max_lines=20)]
+            if code == 0:
+                sections.extend(["", format_submission_subset("TOP DEADLINES", ["deadline"], limit=8), "", format_submission_subset("TOP OPEN / ROLLING", ["open", "rolling"], limit=8)])
+            client.send_message(chat_id, "\n".join(sections))
         return
 
     if cmd == "/retry_unknown":
@@ -1888,13 +1907,17 @@ def handle_command(
             str(DEFAULT_SUBMISSION_REPORT),
             "--json-output",
             str(DEFAULT_SUBMISSION_JSON),
-            "--stdout-format",
-            "json",
-            "--stdout-fields",
-            "summary,artifacts,recent_changes",
         ]
+        if structured_submission_scan:
+            run_cmd.extend(["--stdout-format", "json", "--stdout-fields", "summary,artifacts,recent_changes"])
         code, out = run_local_command(run_cmd, timeout_sec=1200)
-        client.send_message(chat_id, format_submission_scan_digest("retry-unknown", code, out, full_sweep=False))
+        if structured_submission_scan:
+            client.send_message(chat_id, format_submission_scan_digest("retry-unknown", code, out, full_sweep=False))
+        else:
+            sections = [format_command_result("retry-unknown", code, out, max_lines=20)]
+            if code == 0:
+                sections.extend(["", format_submission_subset("TOP DEADLINES", ["deadline"], limit=8), "", format_submission_subset("TOP OPEN / ROLLING", ["open", "rolling"], limit=8)])
+            client.send_message(chat_id, "\n".join(sections))
         return
 
     if cmd == "/retry_failed_ai":
