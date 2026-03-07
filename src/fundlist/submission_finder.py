@@ -2812,6 +2812,31 @@ def _rows_to_json(rows: Sequence[sqlite3.Row]) -> List[Dict[str, object]]:
     return out
 
 
+def _target_to_json(target: SubmissionTarget) -> Dict[str, object]:
+    return {
+        "fingerprint": target.fingerprint,
+        "org_name": target.org_name,
+        "org_type": target.org_type,
+        "domain": target.domain,
+        "source_url": target.source_url,
+        "submission_url": target.submission_url,
+        "submission_type": target.submission_type,
+        "status": target.status,
+        "requirements": target.requirements,
+        "notes": target.notes,
+        "source_page_snapshot": target.source_page_snapshot,
+        "deadline_text": target.deadline_text,
+        "deadline_date": target.deadline_date,
+        "deadline_display": _deadline_display(
+            status=target.status,
+            deadline_date=target.deadline_date,
+            deadline_text=target.deadline_text,
+        ),
+        "evidence": target.evidence,
+        "score": target.score,
+    }
+
+
 def _priority_for_row(row: sqlite3.Row) -> str:
     status = str(row["status"]).strip().lower()
     submission_type = str(row["submission_type"]).strip().lower()
@@ -2977,13 +3002,22 @@ def _render_submission_report(rows: Sequence[sqlite3.Row], events: Sequence[sqli
 
 def submission_scan_command(args: argparse.Namespace) -> int:
     store = SubmissionStore(args.db)
+    stdout_format = str(getattr(args, "stdout_format", "text") or "text").strip().lower()
+    stdout_fields = [field.strip() for field in str(getattr(args, "stdout_fields", "") or "").split(",") if field.strip()]
+    dry_run = bool(getattr(args, "dry_run", False))
+    log_entries: List[Dict[str, object]] = []
+
+    def emit(level: str, message: str) -> None:
+        log_entries.append({"level": level, "message": message})
+        if stdout_format == "text":
+            print(message)
 
     manual_seeds = [s.strip() for s in (args.seed_urls or "").split(",") if s.strip()]
     seeds: List[DiscoverySeed] = []
     only_retry_mode = bool(args.failures_only or args.review_targets_only)
     should_prune_domains = bool(args.prune_domains)
     if should_prune_domains and (only_retry_mode or args.resume_failures or args.review_targets):
-        print("[warn] prune disabled for partial/retry scan modes")
+        emit("warn", "[warn] prune disabled for partial/retry scan modes")
         should_prune_domains = False
     if not only_retry_mode:
         seeds.extend(DiscoverySeed(url=_normalize_seed_url(u), org_name_hint="", source="manual") for u in manual_seeds)
@@ -3018,7 +3052,7 @@ def submission_scan_command(args: argparse.Namespace) -> int:
             try:
                 hits = _search_duckduckgo(query, max_results=args.max_results_per_query)
             except Exception as exc:  # noqa: BLE001
-                print(f"[warn] search failed query={query!r}: {exc}")
+                emit("warn", f"[warn] search failed query={query!r}: {exc}")
                 continue
             for url, title in hits:
                 seeds.append(DiscoverySeed(url=_normalize_seed_url(url), org_name_hint=title, source=f"search:{query}"))
@@ -3038,13 +3072,13 @@ def submission_scan_command(args: argparse.Namespace) -> int:
 
     raw_desc = ", ".join(f"{k}={v}" for k, v in sorted(source_counts_raw.items())) or "none"
     deduped_desc = ", ".join(f"{k}={v}" for k, v in sorted(source_counts_deduped.items())) or "none"
-    print(f"[info] seeds={len(deduped)} (raw={len(seeds)})")
+    emit("info", f"[info] seeds={len(deduped)} (raw={len(seeds)})")
     if resumed_failure_seeds:
-        print(f"[info] resumed_failures={len(resumed_failure_seeds)}")
+        emit("info", f"[info] resumed_failures={len(resumed_failure_seeds)}")
     if resumed_review_target_seeds:
-        print(f"[info] resumed_review_targets={len(resumed_review_target_seeds)}")
-    print(f"[info] seed_sources(raw)={raw_desc}")
-    print(f"[info] seed_sources(deduped)={deduped_desc}")
+        emit("info", f"[info] resumed_review_targets={len(resumed_review_target_seeds)}")
+    emit("info", f"[info] seed_sources(raw)={raw_desc}")
+    emit("info", f"[info] seed_sources(deduped)={deduped_desc}")
     preview_groups: Dict[str, List[DiscoverySeed]] = {}
     for seed in deduped:
         key = seed.source.split(":", 1)[0]
@@ -3052,7 +3086,7 @@ def submission_scan_command(args: argparse.Namespace) -> int:
     for key in sorted(preview_groups):
         for seed in preview_groups[key][:3]:
             label = seed.org_name_hint or _domain_key(seed.url) or "-"
-            print(f"[seed:{key}] {label} -> {seed.url}")
+            emit("info", f"[seed:{key}] {label} -> {seed.url}")
 
     found: List[SubmissionTarget] = []
     prunable_domains: List[str] = []
@@ -3065,68 +3099,152 @@ def submission_scan_command(args: argparse.Namespace) -> int:
         result = _scan_site(seed, max_pages=args.max_pages_per_site, http_timeout=args.http_timeout)
         attempted_at = now_utc_iso()
         if result.failures:
-            for failure in result.failures:
-                store.record_scan_failure(failure, detected_at=attempted_at)
+            if not dry_run:
+                for failure in result.failures:
+                    store.record_scan_failure(failure, detected_at=attempted_at)
             failure_rows += len(result.failures)
-            print(
+            emit(
+                "warn",
                 f"[warn] {idx}/{len(deduped)} {seed.org_name_hint or domain or seed.url} | "
-                f"failures={len(result.failures)}"
+                f"failures={len(result.failures)}",
             )
         target = result.target
         if not target:
             if not result.failures:
                 prunable_domains.append(domain)
-                resolved_failures += store.resolve_scan_failures(seed.url, resolved_at=attempted_at)
+                if not dry_run:
+                    resolved_failures += store.resolve_scan_failures(seed.url, resolved_at=attempted_at)
             continue
         found.append(target)
         prunable_domains.append(domain)
-        resolved_failures += store.resolve_scan_failures(seed.url, resolved_at=attempted_at)
+        if not dry_run:
+            resolved_failures += store.resolve_scan_failures(seed.url, resolved_at=attempted_at)
         deadline_display = _deadline_display(
             status=target.status,
             deadline_date=target.deadline_date,
             deadline_text=target.deadline_text,
         )
-        print(
+        emit(
+            "info",
             f"[hit] {idx}/{len(deduped)} org={target.org_name} type={target.submission_type} "
             f"status={target.status} deadline={deadline_display} score={target.score} "
-            f"apply={target.submission_url}"
+            f"apply={target.submission_url}",
         )
 
-    changed = store.upsert_targets(found)
-    pruned = store.prune_scanned_domains(prunable_domains, [t.fingerprint for t in found]) if should_prune_domains else 0
-    cleaned = store.cleanup_noise() if should_prune_domains else 0
-    rows = store.list_targets(
-        limit=args.report_limit,
-        status=args.status_filter,
-        org_type=args.org_type_filter,
-        min_score=args.min_score,
+    if dry_run:
+        changed = 0
+        pruned = 0
+        cleaned = 0
+        rows: List[sqlite3.Row] = []
+        events: List[sqlite3.Row] = []
+        report_items = [_target_to_json(target) for target in found]
+        output_path = ""
+        json_path_value = ""
+    else:
+        changed = store.upsert_targets(found)
+        pruned = store.prune_scanned_domains(prunable_domains, [t.fingerprint for t in found]) if should_prune_domains else 0
+        cleaned = store.cleanup_noise() if should_prune_domains else 0
+        rows = store.list_targets(
+            limit=args.report_limit,
+            status=args.status_filter,
+            org_type=args.org_type_filter,
+            min_score=args.min_score,
+        )
+        events = store.list_events(limit=args.event_limit)
+
+        output = Path(args.output).expanduser()
+        ensure_parent_dir(str(output))
+        output.write_text(_render_submission_report(rows, events), encoding="utf-8")
+        output_path = str(output)
+        report_items = _rows_to_json(rows)
+        json_path_value = ""
+        if args.json_output:
+            json_path = Path(args.json_output).expanduser()
+            ensure_parent_dir(str(json_path))
+            file_payload = {
+                "generated_at": now_utc_iso(),
+                "filters": {
+                    "status": args.status_filter,
+                    "org_type": args.org_type_filter,
+                    "min_score": args.min_score,
+                },
+                "items": report_items,
+            }
+            json_path.write_text(json.dumps(file_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            json_path_value = str(json_path)
+            emit("info", f"[done] json={json_path} rows={len(rows)}")
+
+    allowed_urls = {
+        _canonicalize_url(str(item.get("submission_url") or ""))
+        for item in report_items
+        if str(item.get("submission_url") or "").strip()
+    }
+    allowed_urls.update(
+        _canonicalize_url(str(item.get("source_url") or ""))
+        for item in report_items
+        if str(item.get("source_url") or "").strip()
     )
-    events = store.list_events(limit=args.event_limit)
+    allowed_urls.discard("")
+    recent_changes = _render_recent_event_summaries(events, allowed_urls=allowed_urls or None) if not dry_run else []
 
-    output = Path(args.output).expanduser()
-    ensure_parent_dir(str(output))
-    output.write_text(_render_submission_report(rows, events), encoding="utf-8")
+    summary_payload = {
+        "raw_seed_count": len(seeds),
+        "deduped_seed_count": len(deduped),
+        "resumed_failures": len(resumed_failure_seeds),
+        "resumed_review_targets": len(resumed_review_target_seeds),
+        "scanned": len(deduped),
+        "found": len(found),
+        "changed": changed,
+        "pruned": pruned,
+        "cleaned": cleaned,
+        "failures": failure_rows,
+        "resolved_failures": resolved_failures,
+        "dry_run": dry_run,
+    }
+    payload = {
+        "command": "submission-scan",
+        "status": "ok",
+        "generated_at": now_utc_iso(),
+        "summary": summary_payload,
+        "inputs": {
+            "seed_urls": manual_seeds,
+            "skip_search": bool(args.skip_search),
+            "from_fundraise": bool(args.from_fundraise),
+            "max_sites": int(args.max_sites),
+            "max_pages_per_site": int(args.max_pages_per_site),
+            "http_timeout": int(args.http_timeout),
+            "status_filter": str(args.status_filter or ""),
+            "org_type_filter": str(args.org_type_filter or ""),
+            "min_score": int(args.min_score),
+        },
+        "seed_counts": {
+            "raw": source_counts_raw,
+            "deduped": source_counts_deduped,
+        },
+        "hits": [_target_to_json(target) for target in found],
+        "report_items": report_items,
+        "recent_changes": recent_changes,
+        "artifacts": {
+            "report_path": output_path,
+            "json_output_path": json_path_value,
+        },
+        "logs": log_entries,
+    }
 
-    if args.json_output:
-        json_path = Path(args.json_output).expanduser()
-        ensure_parent_dir(str(json_path))
-        payload = {
-            "generated_at": now_utc_iso(),
-            "filters": {
-                "status": args.status_filter,
-                "org_type": args.org_type_filter,
-                "min_score": args.min_score,
-            },
-            "items": _rows_to_json(rows),
-        }
-        json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"[done] json={json_path} rows={len(rows)}")
-
-    print(
-        f"[done] scanned={len(deduped)} found={len(found)} changed={changed} pruned={pruned} cleaned={cleaned} "
-        f"failures={failure_rows} resolved_failures={resolved_failures} "
-        f"report={output}"
-    )
+    if stdout_format == "json":
+        if not getattr(args, "include_logs", False):
+            payload.pop("logs", None)
+        if stdout_fields:
+            keys = ["command", "status"] + [field for field in stdout_fields if field not in {"command", "status"}]
+            payload = {key: payload[key] for key in keys if key in payload}
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        report_label = output_path or "(dry-run)"
+        emit(
+            "info",
+            f"[done] scanned={len(deduped)} found={len(found)} changed={changed} pruned={pruned} cleaned={cleaned} "
+            f"failures={failure_rows} resolved_failures={resolved_failures} report={report_label}",
+        )
     return 0
 
 

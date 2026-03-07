@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -118,6 +119,160 @@ DEFAULT_API_HOST = os.environ.get("FUNDLIST_API_HOST", "127.0.0.1")
 DEFAULT_API_PORT = int(os.environ.get("FUNDLIST_API_PORT", "8787"))
 
 
+AGENT_CLI_COMMAND_SPECS = {
+    "submission-scan": {
+        "summary": "Discover submission targets from seed URLs, DB seeds, and optional web search.",
+        "side_effects": [
+            "Reads funding and submission seed records from SQLite.",
+            "Scans websites and may write updated submission targets to SQLite.",
+            "Writes markdown and optional JSON report artifacts unless --dry-run is used.",
+        ],
+        "stdout_formats": ["text", "json"],
+        "machine_fields": [
+            "command",
+            "status",
+            "generated_at",
+            "summary",
+            "inputs",
+            "seed_counts",
+            "hits",
+            "recent_changes",
+            "artifacts",
+            "logs",
+        ],
+        "exit_codes": {
+            "0": "success",
+            "2": "argument validation error",
+        },
+    },
+    "submission-list": {
+        "summary": "Read normalized submission targets from SQLite and print them.",
+        "side_effects": ["Reads submission targets from SQLite."],
+        "stdout_formats": ["text"],
+        "exit_codes": {"0": "success", "2": "argument validation error"},
+    },
+    "changes-list": {
+        "summary": "Read structured opportunity changes from SQLite.",
+        "side_effects": ["Reads changefeed rows from SQLite."],
+        "stdout_formats": ["text"],
+        "exit_codes": {"0": "success", "2": "argument validation error"},
+    },
+    "task-create": {
+        "summary": "Create a managed submission task from a verified opportunity.",
+        "side_effects": ["Reads opportunity data and writes a submission task into SQLite."],
+        "stdout_formats": ["text"],
+        "exit_codes": {"0": "success", "2": "argument validation error"},
+    },
+}
+
+
+def _coerce_default(value: object) -> object:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, (list, tuple)):
+        return [str(v) if isinstance(v, Path) else v for v in value]
+    return str(value)
+
+
+def _action_type_name(action: argparse.Action) -> str:
+    if action.choices:
+        return "enum"
+    if isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)):  # type: ignore[attr-defined]
+        return "boolean"
+    if action.type is not None and hasattr(action.type, "__name__"):
+        return str(action.type.__name__)
+    if action.nargs in {"+", "*"}:
+        return "list"
+    return "string"
+
+
+def _find_subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction | None:  # type: ignore[attr-defined]
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):  # type: ignore[attr-defined]
+            return action
+    return None
+
+
+def _find_command_parser(parser: argparse.ArgumentParser, command_name: str) -> argparse.ArgumentParser | None:
+    subparsers = _find_subparsers(parser)
+    if subparsers is None:
+        return None
+    return subparsers.choices.get(command_name)
+
+
+def _describe_argument(action: argparse.Action) -> dict[str, object] | None:
+    if action.dest in {"help", "cmd", "command", "format"}:
+        return None
+    positional = not bool(action.option_strings)
+    item = {
+        "name": action.dest,
+        "kind": "positional" if positional else "option",
+        "flags": list(action.option_strings),
+        "required": bool(getattr(action, "required", False) or positional),
+        "type": _action_type_name(action),
+        "default": None if positional else _coerce_default(action.default),
+        "choices": list(action.choices) if action.choices else [],
+        "nargs": action.nargs,
+        "help": action.help or "",
+    }
+    return item
+
+
+def _render_text_description(payload: dict[str, object]) -> str:
+    lines = [
+        f"command: {payload['command']}",
+        f"summary: {payload['summary']}",
+        "arguments:",
+    ]
+    for arg in payload["arguments"]:  # type: ignore[index]
+        required = "required" if arg["required"] else "optional"
+        flags = ", ".join(arg["flags"]) if arg["flags"] else arg["name"]
+        type_name = arg["type"]
+        extra = f" choices={','.join(arg['choices'])}" if arg["choices"] else ""
+        lines.append(f"- {flags} [{arg['kind']}] {required} type={type_name}{extra}")
+        if arg["help"]:
+            lines.append(f"  help: {arg['help']}")
+    side_effects = payload.get("side_effects") or []
+    if side_effects:
+        lines.append("side_effects:")
+        for item in side_effects:
+            lines.append(f"- {item}")
+    stdout_formats = payload.get("stdout_formats") or []
+    if stdout_formats:
+        lines.append(f"stdout_formats: {', '.join(stdout_formats)}")
+    return "\n".join(lines)
+
+
+def describe_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    command_name = str(args.command or "").strip()
+    command_parser = _find_command_parser(parser, command_name)
+    if command_parser is None:
+        print(json.dumps({"command": "describe", "status": "error", "message": f"unknown command: {command_name}"}, ensure_ascii=False))
+        return 2
+
+    command_spec = AGENT_CLI_COMMAND_SPECS.get(command_name, {})
+    payload = {
+        "command": command_name,
+        "summary": command_spec.get("summary") or (command_parser.description or command_parser.format_help().splitlines()[0].strip()),
+        "arguments": [
+            item
+            for item in (_describe_argument(action) for action in command_parser._actions)
+            if item is not None
+        ],
+        "side_effects": list(command_spec.get("side_effects", [])),
+        "stdout_formats": list(command_spec.get("stdout_formats", ["text"])),
+        "machine_fields": list(command_spec.get("machine_fields", [])),
+        "exit_codes": dict(command_spec.get("exit_codes", {"0": "success"})),
+    }
+    if args.format == "json":
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(_render_text_description(payload))
+    return 0
+
+
 def collect_command(args: argparse.Namespace) -> int:
     selected = [s.strip().lower() for s in args.sources.split(",") if s.strip()]
     valid = {"openclaw", "sec", "fred", "coingecko"}
@@ -212,6 +367,10 @@ def build_parser() -> argparse.ArgumentParser:
     list_cmd.add_argument("--source", default=None)
     list_cmd.add_argument("--symbol", default=None)
     list_cmd.set_defaults(func=list_command)
+
+    describe = sub.add_parser("describe", help="Describe a CLI command contract for agents")
+    describe.add_argument("command", help="Command name to describe")
+    describe.add_argument("--format", default="json", choices=["json", "text"])
 
     fundraise_import = sub.add_parser("fundraise-import", help="Import fundraising files into SQLite")
     fundraise_import.add_argument(
@@ -399,6 +558,19 @@ def build_parser() -> argparse.ArgumentParser:
     submission_scan.add_argument("--min-score", type=int, default=0)
     submission_scan.add_argument("--event-limit", type=int, default=30)
     submission_scan.add_argument("--json-output", default="", help="Optional JSON export path")
+    submission_scan.add_argument(
+        "--stdout-format",
+        default="text",
+        choices=["text", "json"],
+        help="stdout mode: human-readable text or structured JSON",
+    )
+    submission_scan.add_argument(
+        "--stdout-fields",
+        default="",
+        help="Optional comma-separated top-level JSON fields to emit on stdout when --stdout-format=json",
+    )
+    submission_scan.add_argument("--include-logs", action="store_true", help="Include structured logs in JSON stdout")
+    submission_scan.add_argument("--dry-run", action="store_true", help="Scan without mutating the DB or writing report artifacts")
     submission_scan.add_argument("--output", default=DEFAULT_SUBMISSION_REPORT_PATH)
     submission_scan.set_defaults(func=submission_scan_command)
 
@@ -613,4 +785,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.cmd == "describe":
+        return describe_command(args, parser)
     return int(args.func(args))
