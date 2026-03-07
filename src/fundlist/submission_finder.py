@@ -2831,7 +2831,7 @@ def submission_scan_command(args: argparse.Namespace) -> int:
 
     changed = store.upsert_targets(found)
     pruned = store.prune_scanned_domains(prunable_domains, [t.fingerprint for t in found]) if should_prune_domains else 0
-    cleaned = store.cleanup_noise()
+    cleaned = store.cleanup_noise() if should_prune_domains else 0
     rows = store.list_targets(
         limit=args.report_limit,
         status=args.status_filter,
