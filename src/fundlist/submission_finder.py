@@ -116,6 +116,15 @@ FORM_HOST_MARKERS = [
     "tally.so",
     "wkf.ms",
 ]
+GENERIC_FORM_VENDOR_PATTERNS = [
+    "airtable.com/solutions/",
+    "airtable.com/templates/",
+    "airtable.com/blog/",
+    "airtable.com/product/",
+    "airtable.com/internal/page_view",
+    "typeform.com/templates/",
+    "typeform.com/application-form-builder",
+]
 
 VALID_SUBMISSION_TYPES = {"form", "email", "intro-only", "unknown"}
 VALID_SUBMISSION_STATUSES = {"open", "rolling", "deadline", "closed", "unknown"}
@@ -1587,6 +1596,30 @@ def _validated_override_choice(value: str | None, *, allowed: set[str], field_na
     return normalized
 
 
+def _deadline_display(*, status: str, deadline_date: str, deadline_text: str) -> str:
+    if deadline_date:
+        return deadline_date
+    if deadline_text:
+        return sanitize(deadline_text, limit=80)
+    status_low = str(status or "").strip().lower()
+    if status_low == "deadline":
+        return "deadline mentioned; date unclear"
+    if status_low == "rolling":
+        return "rolling"
+    if status_low == "open":
+        return "no published deadline"
+    if status_low == "closed":
+        return "closed"
+    return "unknown"
+
+
+def _is_generic_form_vendor_url(url: str) -> bool:
+    lowered = _canonicalize_url(url).lower()
+    if not lowered:
+        return False
+    return any(token in lowered for token in GENERIC_FORM_VENDOR_PATTERNS)
+
+
 def _normalize_fundraise_seed_url(raw_url: str, *, category: str, status: str, notes: str) -> str:
     canonical = _canonicalize_url(raw_url)
     if not canonical:
@@ -2065,6 +2098,8 @@ def _evaluate_page(url: str, source_url: str, html: str, org_hint: str) -> Optio
     domain = _domain_key(url)
     if not _is_target_domain(domain):
         return None
+    if _is_generic_form_vendor_url(url):
+        return None
 
     path_hits = [hint for hint in STRONG_PATH_HINTS if hint in path_low]
     phrase_hits = [p for p in SUBMISSION_PHRASES if p in text_low]
@@ -2162,6 +2197,8 @@ def _evaluate_page(url: str, source_url: str, html: str, org_hint: str) -> Optio
     else:
         submission_url, link_note, link_score = _pick_best_submission_url(url, html)
     if not submission_url:
+        return None
+    if _is_generic_form_vendor_url(submission_url):
         return None
     submission_url_low = submission_url.lower()
     if org_type == "VC":
@@ -2658,7 +2695,11 @@ def _render_submission_report(rows: Sequence[sqlite3.Row], events: Sequence[sqli
             org_type = str(row["org_type"]).replace("|", "/")
             submission_type = str(row["submission_type"]).replace("|", "/")
             status = str(row["status"]).replace("|", "/")
-            deadline = str(row["deadline_date"] or row["deadline_text"] or "-").replace("|", "/")
+            deadline = _deadline_display(
+                status=str(row["status"]),
+                deadline_date=str(row["deadline_date"] or ""),
+                deadline_text=str(row["deadline_text"] or ""),
+            ).replace("|", "/")
             score = int(row["score"] or 0)
             url = str(row["submission_url"])
             link = f"[open]({url})"
@@ -2667,15 +2708,19 @@ def _render_submission_report(rows: Sequence[sqlite3.Row], events: Sequence[sqli
             )
         lines.append("")
 
-        top_open = [r for r in ordered_rows if str(r["status"]).lower() in {"open", "rolling"}][:5]
-        if top_open:
+        top_actionable = [r for r in ordered_rows if str(r["status"]).lower() in {"open", "rolling", "deadline"}][:8]
+        if top_actionable:
             lines.append("## Immediate Action Queue")
             lines.append("")
-            for idx, row in enumerate(top_open, start=1):
+            for idx, row in enumerate(top_actionable, start=1):
                 priority = _priority_for_row(row)
                 org_name = sanitize(str(row["org_name"]), limit=100)
                 requirements = sanitize(str(row["requirements"] or "-"), limit=140)
-                deadline = str(row["deadline_date"] or row["deadline_text"] or "-")
+                deadline = _deadline_display(
+                    status=str(row["status"]),
+                    deadline_date=str(row["deadline_date"] or ""),
+                    deadline_text=str(row["deadline_text"] or ""),
+                )
                 lines.append(
                     f"{idx}. [{priority}] {org_name} | status={row['status']} | deadline={deadline} | {row['submission_url']} | requirements={requirements}"
                 )
@@ -2698,8 +2743,9 @@ def _render_submission_report(rows: Sequence[sqlite3.Row], events: Sequence[sqli
         lines.append(f"- submission_url: {row['submission_url']}")
         lines.append(f"- submission_type: {row['submission_type']}")
         lines.append(f"- status: {row['status']}")
-        if row["deadline_date"] or row["deadline_text"]:
-            lines.append(f"- deadline: {row['deadline_date'] or row['deadline_text']}")
+        lines.append(
+            f"- deadline: {_deadline_display(status=str(row['status']), deadline_date=str(row['deadline_date'] or ''), deadline_text=str(row['deadline_text'] or ''))}"
+        )
         lines.append(f"- score: {row['score']}")
         if row["requirements"]:
             lines.append(f"- requirements: {row['requirements']}")
@@ -2790,11 +2836,9 @@ def submission_scan_command(args: argparse.Namespace) -> int:
         key = seed.source.split(":", 1)[0]
         preview_groups.setdefault(key, []).append(seed)
     for key in sorted(preview_groups):
-        for seed in preview_groups[key][:6]:
-            print(
-                f"[seed:{key}] src={seed.source} org={seed.org_name_hint or '-'} "
-                f"url={seed.url}"
-            )
+        for seed in preview_groups[key][:3]:
+            label = seed.org_name_hint or _domain_key(seed.url) or "-"
+            print(f"[seed:{key}] {label} -> {seed.url}")
 
     found: List[SubmissionTarget] = []
     prunable_domains: List[str] = []
@@ -2823,10 +2867,15 @@ def submission_scan_command(args: argparse.Namespace) -> int:
         found.append(target)
         prunable_domains.append(domain)
         resolved_failures += store.resolve_scan_failures(seed.url, resolved_at=attempted_at)
+        deadline_display = _deadline_display(
+            status=target.status,
+            deadline_date=target.deadline_date,
+            deadline_text=target.deadline_text,
+        )
         print(
-            f"[hit] {idx}/{len(deduped)} {target.org_name} | {target.submission_type} | "
-            f"{target.status} | deadline={target.deadline_date or '-'} | score={target.score} | "
-            f"{target.submission_url}"
+            f"[hit] {idx}/{len(deduped)} org={target.org_name} type={target.submission_type} "
+            f"status={target.status} deadline={deadline_display} score={target.score} "
+            f"apply={target.submission_url}"
         )
 
     changed = store.upsert_targets(found)
@@ -2882,6 +2931,11 @@ def submission_list_command(args: argparse.Namespace) -> int:
     ordered_rows = _sort_rows_for_report(rows)
     print("priority\torg_name\torg_type\tsubmission_type\tstatus\tdeadline\tscore\tofficial_page\tsubmission_url")
     for row in ordered_rows:
+        deadline_display = _deadline_display(
+            status=str(row["status"]),
+            deadline_date=str(row["deadline_date"] or ""),
+            deadline_text=str(row["deadline_text"] or ""),
+        )
         print(
             "\t".join(
                 [
@@ -2890,7 +2944,7 @@ def submission_list_command(args: argparse.Namespace) -> int:
                     str(row["org_type"]),
                     str(row["submission_type"]),
                     str(row["status"]),
-                    str(row["deadline_date"] or row["deadline_text"]),
+                    deadline_display,
                     str(row["score"]),
                     str(row["source_url"]),
                     str(row["submission_url"]),
