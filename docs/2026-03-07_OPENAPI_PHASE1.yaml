@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Fundlist Internal Ops API
   version: 0.1.0
-  summary: Internal API for verified opportunities, changefeed, tasks, scans, and briefs
+  summary: Dependency-free internal API for verified opportunities, review queue, tasks, scans, and briefs
 servers:
   - url: http://127.0.0.1:8787
 security:
@@ -11,6 +11,7 @@ tags:
   - name: health
   - name: opportunities
   - name: changes
+  - name: review
   - name: tasks
   - name: scans
   - name: briefs
@@ -26,18 +27,8 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                  service:
-                    type: string
-                  version:
-                    type: string
-                  db_path:
-                    type: string
-                required: [ok, service, version]
-  /opportunities:
+                $ref: '#/components/schemas/HealthResponse'
+  /v1/opportunities:
     get:
       tags: [opportunities]
       summary: List verified opportunities
@@ -48,47 +39,30 @@ paths:
             type: string
             enum: [open, rolling, deadline, closed, unknown]
         - in: query
+          name: org_type
+          schema:
+            type: string
+        - in: query
           name: min_score
           schema:
             type: integer
             minimum: 0
             default: 0
         - in: query
-          name: min_priority_score
-          schema:
-            type: integer
-            minimum: 0
-            default: 0
-        - in: query
-          name: deadline_to
-          schema:
-            type: string
-            format: date
-        - in: query
           name: limit
           schema:
             type: integer
             minimum: 1
-            maximum: 200
-            default: 50
+            maximum: 500
+            default: 80
       responses:
         '200':
           description: Opportunity list
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Opportunity'
-                  next_cursor:
-                    type: string
-                  has_more:
-                    type: boolean
-                required: [items, has_more]
-  /opportunities/{fingerprint}:
+                $ref: '#/components/schemas/OpportunityListResponse'
+  /v1/opportunities/{fingerprint}:
     get:
       tags: [opportunities]
       summary: Get a verified opportunity by fingerprint
@@ -104,7 +78,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/OpportunityDetail'
+                $ref: '#/components/schemas/OpportunityItemResponse'
         '404':
           $ref: '#/components/responses/NotFound'
     patch:
@@ -128,38 +102,39 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/OpportunityDetail'
+                $ref: '#/components/schemas/OpportunityItemResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '404':
           $ref: '#/components/responses/NotFound'
-  /changes:
+  /v1/changes:
     get:
       tags: [changes]
-      summary: List recent opportunity changes
+      summary: List recent structured opportunity changes
       parameters:
         - in: query
           name: change_type
           schema:
             type: string
-            enum:
-              - new_opportunity
-              - status_changed
-              - deadline_changed
-              - submission_url_changed
-              - source_url_changed
-              - reopened
+            enum: [new_opportunity, status_changed, deadline_changed, submission_url_changed, source_url_changed, reopened]
         - in: query
           name: since
           schema:
             type: string
             format: date-time
         - in: query
+          name: since_days
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 365
+            default: 1
+        - in: query
           name: limit
           schema:
             type: integer
             minimum: 1
-            maximum: 200
+            maximum: 500
             default: 50
       responses:
         '200':
@@ -167,17 +142,11 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/OpportunityChange'
-                required: [items]
-  /review-queue:
+                $ref: '#/components/schemas/ChangeListResponse'
+  /v1/review-queue:
     get:
-      tags: [changes]
-      summary: List items needing manual review
+      tags: [review]
+      summary: List failures and uncertain targets needing manual review
       parameters:
         - in: query
           name: limit
@@ -192,20 +161,17 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      type: object
-                  count:
-                    type: integer
-                required: [items, count]
-  /tasks:
+                $ref: '#/components/schemas/ReviewQueueResponse'
+  /v1/tasks:
     get:
       tags: [tasks]
       summary: List submission tasks
       parameters:
+        - in: query
+          name: workspace_key
+          schema:
+            type: string
+            default: default
         - in: query
           name: submission_state
           schema:
@@ -224,21 +190,15 @@ paths:
           schema:
             type: integer
             minimum: 1
-            maximum: 200
-            default: 50
+            maximum: 500
+            default: 40
       responses:
         '200':
           description: Task list
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/SubmissionTask'
-                required: [items]
+                $ref: '#/components/schemas/TaskListResponse'
     post:
       tags: [tasks]
       summary: Create a submission task from an opportunity
@@ -249,15 +209,21 @@ paths:
             schema:
               $ref: '#/components/schemas/CreateTaskRequest'
       responses:
+        '200':
+          description: Existing task returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateTaskResponse'
         '201':
           description: Task created
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SubmissionTask'
+                $ref: '#/components/schemas/CreateTaskResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
-  /tasks/{task_id}:
+  /v1/tasks/{task_id}:
     patch:
       tags: [tasks]
       summary: Update a submission task
@@ -279,15 +245,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SubmissionTask'
+                $ref: '#/components/schemas/TaskResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
-        '404':
-          $ref: '#/components/responses/NotFound'
-  /tasks/{task_id}/submitted:
+  /v1/tasks/{task_id}/submitted:
     post:
       tags: [tasks]
-      summary: Mark a submission task as submitted
+      summary: Mark a task as submitted
       parameters:
         - in: path
           name: task_id
@@ -307,67 +271,57 @@ paths:
                 follow_up_days:
                   type: integer
                   minimum: 1
-                  default: 14
+                  maximum: 365
                 note:
                   type: string
       responses:
         '200':
-          description: Task submitted
+          description: Task updated
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SubmissionTask'
+                $ref: '#/components/schemas/TaskResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
-        '404':
-          $ref: '#/components/responses/NotFound'
-  /scans/full:
+  /v1/scans/full:
     post:
       tags: [scans]
-      summary: Trigger a full verification scan
+      summary: Run a synchronous authoritative sweep
       requestBody:
         required: false
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                max_sites:
-                  type: integer
-                max_pages_per_site:
-                  type: integer
-                skip_search:
-                  type: boolean
+              $ref: '#/components/schemas/ScanRequest'
       responses:
-        '202':
-          description: Full scan accepted
+        '200':
+          description: Scan completed
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/JobResponse'
-  /scans/delta:
+                $ref: '#/components/schemas/ScanResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /v1/scans/delta:
     post:
       tags: [scans]
-      summary: Trigger a delta verification scan
+      summary: Run a synchronous partial scan
       requestBody:
         required: false
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                seed_urls:
-                  type: array
-                  items:
-                    type: string
+              $ref: '#/components/schemas/ScanRequest'
       responses:
-        '202':
-          description: Delta scan accepted
+        '200':
+          description: Scan completed
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/JobResponse'
-  /scans/review-retry:
+                $ref: '#/components/schemas/ScanResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /v1/scans/review-retry:
     post:
       tags: [scans]
       summary: Retry unknown or uncertain reviewed targets only
@@ -376,26 +330,17 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                review_target_limit:
-                  type: integer
-                max_sites:
-                  type: integer
-                max_pages_per_site:
-                  type: integer
-                http_timeout:
-                  type: integer
-                report_limit:
-                  type: integer
+              $ref: '#/components/schemas/ScanRequest'
       responses:
-        '202':
-          description: Review retry scan accepted
+        '200':
+          description: Review retry scan completed
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/JobResponse'
-  /scans/fallback:
+                $ref: '#/components/schemas/ScanResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /v1/scans/fallback:
     post:
       tags: [scans]
       summary: Retry failed seeds with search and AI-assisted candidate selection
@@ -409,43 +354,64 @@ paths:
                 limit:
                   type: integer
                 seed_urls:
-                  type: array
-                  items:
-                    type: string
+                  oneOf:
+                    - type: string
+                    - type: array
+                      items:
+                        type: string
                 ai_provider:
                   type: string
                   enum: [auto, groq, gemini, huggingface, openrouter]
+                model:
+                  type: string
                 max_results_per_query:
                   type: integer
                 max_candidates:
                   type: integer
                 max_candidate_scan:
                   type: integer
-      responses:
-        '202':
-          description: Fallback scan accepted
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/JobResponse'
-  /briefs/latest:
-    get:
-      tags: [briefs]
-      summary: Get latest daily brief
-      parameters:
-        - in: query
-          name: kind
-          schema:
-            type: string
-            enum: [morning, evening]
-            default: morning
+                max_pages_per_site:
+                  type: integer
+                http_timeout:
+                  type: integer
+                min_score:
+                  type: integer
+                report_limit:
+                  type: integer
+                event_limit:
+                  type: integer
+                status_filter:
+                  type: string
+                org_type_filter:
+                  type: string
+                output:
+                  type: string
+                json_output:
+                  type: string
+                refresh_submission_report:
+                  type: string
+                refresh_submission_json:
+                  type: string
       responses:
         '200':
-          description: Latest brief
+          description: Fallback scan completed
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Brief'
+                $ref: '#/components/schemas/ScanResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /v1/briefs/latest:
+    get:
+      tags: [briefs]
+      summary: Return the latest generated reports
+      responses:
+        '200':
+          description: Latest brief bundle
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BriefLatestResponse'
 components:
   securitySchemes:
     bearerAuth:
@@ -469,117 +435,107 @@ components:
     ErrorResponse:
       type: object
       properties:
+        ok:
+          type: boolean
         error:
-          type: object
-          properties:
-            code:
-              type: string
-            message:
-              type: string
-            request_id:
-              type: string
-          required: [code, message]
-      required: [error]
-    SubmissionState:
-      type: string
-      enum:
-        - not_started
-        - researching
-        - drafting
-        - waiting_assets
-        - ready_to_submit
-        - submitted
-        - follow_up_due
-        - won
-        - rejected
-        - archived
-    OpportunityFacts:
+          type: string
+        message:
+          type: string
+      required: [ok, error, message]
+    HealthResponse:
       type: object
       properties:
-        fingerprint:
+        ok:
+          type: boolean
+        service:
           type: string
+        version:
+          type: string
+        db_path:
+          type: string
+        time:
+          type: string
+          format: date-time
+      required: [ok, service, version, db_path, time]
+    OpportunityRow:
+      type: object
+      properties:
+        id:
+          type: integer
         org_name:
           type: string
         org_type:
           type: string
         domain:
           type: string
-        official_page:
+        source_url:
           type: string
         submission_url:
           type: string
         submission_type:
           type: string
+          enum: [form, email, intro-only, unknown]
+        fingerprint:
+          type: string
         status:
+          type: string
+          enum: [open, rolling, deadline, closed, unknown]
+        requirements:
+          type: string
+        notes:
+          type: string
+        evidence:
+          type: string
+        source_page_snapshot:
           type: string
         deadline_text:
           type: string
         deadline_date:
           type: string
           format: date
-        requirements:
-          type: string
-        evidence:
-          type: string
-        source_page_snapshot:
-          type: string
         score:
           type: integer
-        verified_at:
+        discovered_at:
           type: string
           format: date-time
-      required:
-        - fingerprint
-        - org_name
-        - domain
-        - official_page
-        - submission_url
-        - status
-    OpportunityInference:
-      type: object
-      properties:
-        priority_score:
-          type: integer
-        priority_reason:
+        last_checked_at:
           type: string
-        fit_score:
-          type: integer
-        trust_score:
-          type: integer
-        urgency_score:
-          type: integer
-        readiness_score:
-          type: integer
-    Opportunity:
+          format: date-time
+      required: [org_name, domain, source_url, submission_url, submission_type, fingerprint, status, score]
+    OpportunityListResponse:
       type: object
       properties:
-        facts:
-          $ref: '#/components/schemas/OpportunityFacts'
-        inference:
-          $ref: '#/components/schemas/OpportunityInference'
-      required: [facts]
-    OpportunityDetail:
-      allOf:
-        - $ref: '#/components/schemas/Opportunity'
-        - type: object
-          properties:
-            recent_changes:
-              type: array
-              items:
-                $ref: '#/components/schemas/OpportunityChange'
-            linked_tasks:
-              type: array
-              items:
-                $ref: '#/components/schemas/SubmissionTask'
+        ok:
+          type: boolean
+        count:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OpportunityRow'
+      required: [ok, count, items]
+    OpportunityItemResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        item:
+          $ref: '#/components/schemas/OpportunityRow'
+      required: [ok, item]
     OpportunityChange:
       type: object
       properties:
+        id:
+          type: integer
         fingerprint:
           type: string
         org_name:
           type: string
+        domain:
+          type: string
         change_type:
           type: string
+          enum: [new_opportunity, status_changed, deadline_changed, submission_url_changed, source_url_changed, reopened]
         old_value:
           type: string
         new_value:
@@ -591,18 +547,80 @@ components:
         detected_at:
           type: string
           format: date-time
-      required:
-        - fingerprint
-        - change_type
-        - detected_at
+      required: [fingerprint, org_name, change_type, detected_at]
+    ChangeListResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        count:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OpportunityChange'
+      required: [ok, count, items]
+    ReviewQueueItem:
+      type: object
+      properties:
+        ref:
+          type: string
+        queue_type:
+          type: string
+        review_reason:
+          type: string
+        org_name:
+          type: string
+        status:
+          type: string
+        priority_score:
+          type: integer
+        official_page:
+          type: string
+        submission_url:
+          type: string
+        seed_source:
+          type: string
+        error_type:
+          type: string
+        error_message:
+          type: string
+        last_seen_at:
+          type: string
+      required: [ref, queue_type, review_reason, org_name, status]
+    ReviewQueueResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        count:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReviewQueueItem'
+      required: [ok, count, items]
+    SubmissionState:
+      type: string
+      enum: [not_started, researching, drafting, waiting_assets, ready_to_submit, submitted, follow_up_due, won, rejected, archived]
     SubmissionTask:
       type: object
       properties:
         id:
           type: integer
+        workspace_key:
+          type: string
         opportunity_fingerprint:
           type: string
         org_name:
+          type: string
+        domain:
+          type: string
+        official_page:
+          type: string
+        submission_url:
+          type: string
+        opportunity_status:
           type: string
         submission_state:
           $ref: '#/components/schemas/SubmissionState'
@@ -619,32 +637,55 @@ components:
           format: date
         priority_score:
           type: integer
-        fit_score:
-          type: integer
         recommended_action:
           type: string
         notes:
           type: string
-        official_page:
+        created_at:
           type: string
-        submission_url:
-          type: string
-        opportunity_status:
-          type: string
+          format: date-time
         updated_at:
           type: string
           format: date-time
-      required:
-        - id
-        - opportunity_fingerprint
-        - org_name
-        - submission_state
+      required: [id, opportunity_fingerprint, org_name, submission_state]
+    TaskListResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        count:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SubmissionTask'
+      required: [ok, count, items]
+    TaskResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        task:
+          $ref: '#/components/schemas/SubmissionTask'
+      required: [ok, task]
+    CreateTaskResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        created:
+          type: boolean
+        task:
+          $ref: '#/components/schemas/SubmissionTask'
+      required: [ok, created, task]
     CreateTaskRequest:
       type: object
       properties:
-        fingerprint:
+        target:
           type: string
-        query:
+        target_query:
+          type: string
+        workspace_key:
           type: string
         owner:
           type: string
@@ -655,9 +696,9 @@ components:
           $ref: '#/components/schemas/SubmissionState'
         notes:
           type: string
-      oneOf:
-        - required: [fingerprint]
-        - required: [query]
+      anyOf:
+        - required: [target]
+        - required: [target_query]
     UpdateTaskRequest:
       type: object
       properties:
@@ -685,6 +726,7 @@ components:
           type: string
         submission_type:
           type: string
+          enum: [form, email, intro-only, unknown]
         status:
           type: string
           enum: [open, rolling, deadline, closed, unknown]
@@ -702,26 +744,108 @@ components:
         score:
           type: integer
           minimum: 0
-    Brief:
+    ScanRequest:
       type: object
       properties:
-        kind:
+        seed_urls:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        query:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        queries:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        skip_search:
+          type: boolean
+        from_fundraise:
+          type: boolean
+        review_targets:
+          type: boolean
+        review_targets_only:
+          type: boolean
+        prune_domains:
+          type: boolean
+        review_target_limit:
+          type: integer
+        fundraise_seed_limit:
+          type: integer
+        max_results_per_query:
+          type: integer
+        max_sites:
+          type: integer
+        max_pages_per_site:
+          type: integer
+        http_timeout:
+          type: integer
+        query_file:
           type: string
-          enum: [morning, evening]
+        sector:
+          type: string
+        stage:
+          type: string
+        region:
+          type: string
+        status_filter:
+          type: string
+        org_type_filter:
+          type: string
+        json_output:
+          type: string
+        output:
+          type: string
+        report_limit:
+          type: integer
+        min_score:
+          type: integer
+        event_limit:
+          type: integer
+    ScanResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        scan_type:
+          type: string
+          enum: [full, delta, review_retry, fallback]
+        returncode:
+          type: integer
+        stdout:
+          type: string
+        stderr:
+          type: string
+        command:
+          type: array
+          items:
+            type: string
+      required: [ok, scan_type, returncode, stdout, stderr, command]
+    BriefLatestResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
         generated_at:
           type: string
           format: date-time
-        markdown_body:
+        ops_report_path:
           type: string
-      required: [kind, generated_at, markdown_body]
-    JobResponse:
-      type: object
-      properties:
-        job_id:
+        submission_report_path:
           type: string
-        status:
+        submission_json_path:
           type: string
-          enum: [queued, running, completed, failed]
-        job_type:
+        ops_report:
           type: string
-      required: [job_id, status, job_type]
+        submission_report:
+          type: string
+        submission_json:
+          type: string
+      required: [ok, generated_at, ops_report_path, submission_report_path, submission_json_path, ops_report, submission_report, submission_json]

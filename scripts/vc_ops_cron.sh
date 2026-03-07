@@ -66,6 +66,7 @@ if [[ "${VC_SUBMISSION_SCAN:-1}" != "0" ]]; then
     DEFAULT_MAX_RESULTS="0"
   fi
   SUBMISSION_ARGS=(
+    --prune-domains
     --max-sites "${VC_SUBMISSION_MAX_SITES:-$DEFAULT_MAX_SITES}"
     --max-pages-per-site "${VC_SUBMISSION_MAX_PAGES:-6}"
     --max-results-per-query "${VC_SUBMISSION_MAX_RESULTS_PER_QUERY:-$DEFAULT_MAX_RESULTS}"

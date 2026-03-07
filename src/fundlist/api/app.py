@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .. import __version__
 from ..changefeed import _since_iso
 from ..review_queue import list_review_queue
 from ..submission_finder import SubmissionStore
@@ -189,6 +190,7 @@ class FundlistAPIHandler(BaseHTTPRequestHandler):
                     {
                         "ok": True,
                         "service": "fundlist-api",
+                        "version": __version__,
                         "db_path": str(self.server.db_path),
                         "time": now_utc_iso(),
                     },
@@ -496,8 +498,15 @@ class FundlistAPIHandler(BaseHTTPRequestHandler):
             args.extend(["--query", query])
         if review_targets_only or _parse_bool(body.get("review_targets_only"), default=False):
             args.append("--review-targets-only")
-        elif _parse_bool(body.get("review_targets"), default=False):
-            args.append("--review-targets")
+        else:
+            review_targets = _parse_bool(body.get("review_targets"), default=False)
+            if review_targets:
+                args.append("--review-targets")
+        if _parse_bool(
+            body.get("prune_domains"),
+            default=(full and not review_targets_only and not _parse_bool(body.get("review_targets"), default=False)),
+        ):
+            args.append("--prune-domains")
         if _parse_bool(body.get("skip_search"), default=(not full or review_targets_only)):
             args.append("--skip-search")
         if not _parse_bool(body.get("from_fundraise"), default=(not review_targets_only)):
@@ -585,6 +594,9 @@ def api_serve_command(args: argparse.Namespace) -> int:
     submission_report_path = Path(args.submission_report).expanduser()
     submission_json_path = Path(args.submission_json).expanduser()
     api_token = str(args.api_token or DEFAULT_API_TOKEN).strip()
+    if not api_token and not bool(args.allow_no_auth):
+        print("[error] api token required: set FUNDLIST_API_TOKEN or pass --api-token (use --allow-no-auth only for local debugging)", file=sys.stderr)
+        return 2
 
     httpd = FundlistAPIServer(
         (host, port),

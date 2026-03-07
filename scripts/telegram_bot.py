@@ -1304,6 +1304,7 @@ def handle_command(
         if full_sweep:
             run_cmd.extend(
                 [
+                    "--prune-domains",
                     "--skip-search",
                     "--max-sites",
                     os.environ.get("VC_SUBMISSION_MAX_SITES", "500"),

@@ -27,6 +27,8 @@ from .submission_finder import (
     submission_report_command,
     submission_scan_command,
     target_override_command,
+    VALID_SUBMISSION_STATUSES,
+    VALID_SUBMISSION_TYPES,
 )
 from .submission_tasks import (
     task_add_note_command,
@@ -380,6 +382,7 @@ def build_parser() -> argparse.ArgumentParser:
     submission_scan.add_argument("--max-sites", type=int, default=120)
     submission_scan.add_argument("--max-pages-per-site", type=int, default=6)
     submission_scan.add_argument("--http-timeout", type=int, default=10)
+    submission_scan.add_argument("--prune-domains", action="store_true", help="Allow domain-level prune after authoritative sweep")
     submission_scan.add_argument("--resume-failures", action="store_true", help="Prepend unresolved failed seeds")
     submission_scan.add_argument("--failures-only", action="store_true", help="Retry unresolved failed seeds only")
     submission_scan.add_argument("--failure-limit", type=int, default=120, help="Max unresolved failed seeds to load")
@@ -445,8 +448,8 @@ def build_parser() -> argparse.ArgumentParser:
     target_override.add_argument("--org-type", default=None)
     target_override.add_argument("--source-url", default=None)
     target_override.add_argument("--submission-url", default=None)
-    target_override.add_argument("--submission-type", default=None)
-    target_override.add_argument("--status", default=None)
+    target_override.add_argument("--submission-type", default=None, choices=sorted(VALID_SUBMISSION_TYPES))
+    target_override.add_argument("--status", default=None, choices=sorted(VALID_SUBMISSION_STATUSES))
     target_override.add_argument("--requirements", default=None)
     target_override.add_argument("--notes", default=None)
     target_override.add_argument("--evidence", default=None)
@@ -601,6 +604,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(PROJECT_ROOT / "data" / "reports" / "submission_targets.json"),
     )
     api_serve.add_argument("--api-token", default=os.environ.get("FUNDLIST_API_TOKEN", ""))
+    api_serve.add_argument("--allow-no-auth", action="store_true", help="Allow serving without API token for local debugging")
     api_serve.set_defaults(func=api_serve_command)
 
     return parser

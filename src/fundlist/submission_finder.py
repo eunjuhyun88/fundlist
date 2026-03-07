@@ -117,6 +117,9 @@ FORM_HOST_MARKERS = [
     "wkf.ms",
 ]
 
+VALID_SUBMISSION_TYPES = {"form", "email", "intro-only", "unknown"}
+VALID_SUBMISSION_STATUSES = {"open", "rolling", "deadline", "closed", "unknown"}
+
 CLOSED_MARKERS = [
     "applications closed",
     "application closed",
@@ -1030,6 +1033,16 @@ class SubmissionStore:
         if current is None:
             return None
 
+        validated_submission_type = _validated_override_choice(
+            submission_type,
+            allowed=VALID_SUBMISSION_TYPES,
+            field_name="submission_type",
+        )
+        validated_status = _validated_override_choice(
+            status,
+            allowed=VALID_SUBMISSION_STATUSES,
+            field_name="status",
+        )
         merged_source_url = _canonicalize_url(str(source_url).strip()) if source_url is not None and str(source_url).strip() else str(current["source_url"] or "")
         merged_submission_url = _canonicalize_url(str(submission_url).strip()) if submission_url is not None and str(submission_url).strip() else str(current["submission_url"] or "")
         merged_domain = _domain_key(merged_submission_url or merged_source_url or str(current["source_url"] or ""))
@@ -1048,8 +1061,8 @@ class SubmissionStore:
             domain=merged_domain or str(current["domain"] or ""),
             source_url=merged_source_url or str(current["source_url"] or ""),
             submission_url=merged_submission_url or str(current["submission_url"] or ""),
-            submission_type=sanitize(str(submission_type if submission_type is not None else current["submission_type"]), limit=40),
-            status=sanitize(str(status if status is not None else current["status"]), limit=40),
+            submission_type=str(validated_submission_type if submission_type is not None else current["submission_type"]),
+            status=str(validated_status if status is not None else current["status"]),
             requirements=sanitize(str(requirements if requirements is not None else current["requirements"]), limit=600),
             notes=merged_notes,
             evidence=merged_evidence,
@@ -1561,6 +1574,17 @@ def _normalize_seed_url(raw_url: str) -> str:
     if path_low and path_low != "/" and (not has_submission_path or _is_content_like_url(url)):
         return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/", "", ""))
     return url
+
+
+def _validated_override_choice(value: str | None, *, allowed: set[str], field_name: str) -> str | None:
+    if value is None:
+        return None
+    normalized = sanitize(str(value), limit=80).lower()
+    if not normalized:
+        return ""
+    if normalized not in allowed:
+        raise ValueError(f"invalid {field_name}: {value!r} (allowed: {', '.join(sorted(allowed))})")
+    return normalized
 
 
 def _normalize_fundraise_seed_url(raw_url: str, *, category: str, status: str, notes: str) -> str:
@@ -2697,6 +2721,10 @@ def submission_scan_command(args: argparse.Namespace) -> int:
     manual_seeds = [s.strip() for s in (args.seed_urls or "").split(",") if s.strip()]
     seeds: List[DiscoverySeed] = []
     only_retry_mode = bool(args.failures_only or args.review_targets_only)
+    should_prune_domains = bool(args.prune_domains)
+    if should_prune_domains and (only_retry_mode or args.resume_failures or args.review_targets):
+        print("[warn] prune disabled for partial/retry scan modes")
+        should_prune_domains = False
     if not only_retry_mode:
         seeds.extend(DiscoverySeed(url=_normalize_seed_url(u), org_name_hint="", source="manual") for u in manual_seeds)
         # Re-check previously known submission targets first, then expand to fundraising DB websites.
@@ -2802,7 +2830,7 @@ def submission_scan_command(args: argparse.Namespace) -> int:
         )
 
     changed = store.upsert_targets(found)
-    pruned = store.prune_scanned_domains(prunable_domains, [t.fingerprint for t in found])
+    pruned = store.prune_scanned_domains(prunable_domains, [t.fingerprint for t in found]) if should_prune_domains else 0
     cleaned = store.cleanup_noise()
     rows = store.list_targets(
         limit=args.report_limit,
@@ -2970,34 +2998,40 @@ def scan_failure_ignore_command(args: argparse.Namespace) -> int:
 
 def target_override_command(args: argparse.Namespace) -> int:
     store = SubmissionStore(args.db)
-    row = store.override_target(
-        args.ref,
-        org_name=args.org_name,
-        org_type=args.org_type,
-        source_url=args.source_url,
-        submission_url=args.submission_url,
-        submission_type=args.submission_type,
-        status=args.status,
-        requirements=args.requirements,
-        notes=args.notes,
-        evidence=args.evidence,
-        deadline_text=args.deadline_text,
-        deadline_date=args.deadline_date,
-        score=args.score,
-    )
-    if row is None:
-        print(f"[error] target not found: {args.ref}")
-        return 2
-    print(
-        "\t".join(
-            [
-                str(row["fingerprint"]),
-                str(row["org_name"]),
-                str(row["status"]),
-                str(row["submission_type"]),
-                str(row["deadline_date"] or row["deadline_text"]),
-                str(row["submission_url"]),
-            ]
+    try:
+        row = store.override_target(
+            args.ref,
+            org_name=args.org_name,
+            org_type=args.org_type,
+            source_url=args.source_url,
+            submission_url=args.submission_url,
+            submission_type=args.submission_type,
+            status=args.status,
+            requirements=args.requirements,
+            notes=args.notes,
+            evidence=args.evidence,
+            deadline_text=args.deadline_text,
+            deadline_date=args.deadline_date,
+            score=args.score,
         )
-    )
-    return 0
+        if row is None:
+            print(f"[error] target not found: {args.ref}")
+            return 2
+        print(
+            "\t".join(
+                [
+                    str(row["fingerprint"]),
+                    str(row["org_name"]),
+                    str(row["status"]),
+                    str(row["submission_type"]),
+                    str(row["deadline_date"] or row["deadline_text"]),
+                    str(row["submission_url"]),
+                ]
+            )
+        )
+        return 0
+    except ValueError as exc:
+        print(f"[error] {exc}")
+        return 2
+    finally:
+        store.close()
